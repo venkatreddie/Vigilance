@@ -1,0 +1,47 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.vscode/
+.idea/
+
+# Logs & temp
+*.log
+*.tmp
+*.bak
+
+# Media files (avoid pushing large files)
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flac
+
+# Images & dataset files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.csv
+*.xlsx
+*.json
+*.npz
+*.npy
+
+# System/Editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# OneDrive temporary files
+*.lnk
+~$*
