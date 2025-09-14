@@ -1,121 +1,118 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-import csv
 import time
-import winsound  # For beep sound
+import winsound
 
-# Mediapipe setup
+# Initialize Mediapipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
-mp_drawing = mp.solutions.drawing_utils
 
-# Eye & Mouth indices for Mediapipe
-LEFT_EYE = [33, 160, 158, 133, 153, 144]   # left eye landmarks
-RIGHT_EYE = [362, 385, 387, 263, 373, 380] # right eye landmarks
-MOUTH = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324,
-         308, 415, 310, 311, 312, 13]       # mouth landmarks
+# Mouth indices
+MOUTH = {
+    "left": 61,
+    "right": 291,
+    "top_outer": 81,
+    "bottom_outer": 178,
+    "top_inner": 13,
+    "bottom_inner": 14,
+}
+
+# Eye indices
+LEFT_EYE = [33, 160, 158, 133, 153, 144]
+RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+
+# Distance helper
+def euclidean_dist(p1, p2):
+    return np.linalg.norm(np.array([p1.x, p1.y]) - np.array([p2.x, p2.y]))
 
 # EAR calculation
 def calculate_EAR(landmarks, eye_indices):
-    p1 = np.array([landmarks[eye_indices[0]].x, landmarks[eye_indices[0]].y])
-    p2 = np.array([landmarks[eye_indices[1]].x, landmarks[eye_indices[1]].y])
-    p3 = np.array([landmarks[eye_indices[2]].x, landmarks[eye_indices[2]].y])
-    p4 = np.array([landmarks[eye_indices[3]].x, landmarks[eye_indices[3]].y])
-    p5 = np.array([landmarks[eye_indices[4]].x, landmarks[eye_indices[4]].y])
-    p6 = np.array([landmarks[eye_indices[5]].x, landmarks[eye_indices[5]].y])
+    A = euclidean_dist(landmarks[eye_indices[1]], landmarks[eye_indices[5]])
+    B = euclidean_dist(landmarks[eye_indices[2]], landmarks[eye_indices[4]])
+    C = euclidean_dist(landmarks[eye_indices[0]], landmarks[eye_indices[3]])
+    return (A + B) / (2.0 * C)
 
-    vertical1 = np.linalg.norm(p2 - p5)
-    vertical2 = np.linalg.norm(p3 - p4)
-    horizontal = np.linalg.norm(p1 - p6)
-
-
-    EAR = (vertical1 + vertical2) / (2.0 * horizontal)
-    return EAR
-
-# MAR calculation
+# MAR calculation (fixed)
 def calculate_MAR(landmarks):
-    top_lip = np.array([landmarks[13].x, landmarks[13].y])
-    bottom_lip = np.array([landmarks[14].x, landmarks[14].y])
-    left_corner = np.array([landmarks[78].x, landmarks[78].y])
-    right_corner = np.array([landmarks[308].x, landmarks[308].y])
+    A = euclidean_dist(landmarks[MOUTH["top_inner"]], landmarks[MOUTH["bottom_inner"]])
+    B = euclidean_dist(landmarks[MOUTH["top_outer"]], landmarks[MOUTH["bottom_outer"]])
+    C = euclidean_dist(landmarks[MOUTH["left"]], landmarks[MOUTH["right"]])
+    return (A + B) / (2.0 * C)
 
-    vertical = np.linalg.norm(top_lip - bottom_lip)
-    horizontal = np.linalg.norm(left_corner - right_corner)
+# Calibration
+def calibrate(cap, duration=5):
+    print("Calibration started... Look straight, keep eyes open, lips closed.")
+    start = time.time()
+    ear_vals, mar_vals = [], []
+    while time.time() - start < duration:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb)
+        if results.multi_face_landmarks:
+            lm = results.multi_face_landmarks[0].landmark
+            ear = (calculate_EAR(lm, LEFT_EYE) + calculate_EAR(lm, RIGHT_EYE)) / 2.0
+            mar = calculate_MAR(lm)
+            ear_vals.append(ear)
+            mar_vals.append(mar)
+    ear_thresh = np.mean(ear_vals) * 0.8   # 80% of open eye EAR
+    mar_base = np.mean(mar_vals)           # baseline closed-mouth MAR
+    mar_thresh = max(mar_base * 1.8, 0.5)  # yawning only if much larger
+    print(f"Calibration complete → EAR_THRESHOLD={ear_thresh:.3f}, MAR_THRESHOLD={mar_thresh:.3f}")
+    return ear_thresh, mar_thresh
 
-    MAR = vertical / horizontal
-    return MAR
-
-# Beep alert
-def play_alert():
-    frequency = 1000  # 1kHz
-    duration = 300    # 300 ms
-    winsound.Beep(frequency, duration)
-
-# CSV logging setup
-csv_file = "../data/feature_log.csv"
-with open(csv_file, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["Timestamp", "EAR", "MAR"])
-
-# Thresholds
-EAR_THRESHOLD = 0.21  # Adjusted for Mediapipe normalized coords
-MAR_THRESHOLD = 0.6
-CONSEC_FRAMES = 10
-
-ear_counter = 0
-mar_counter = 0
-
-# Video capture
+# Main
 cap = cv2.VideoCapture(0)
+EAR_THRESHOLD, MAR_THRESHOLD = calibrate(cap)
 
-while cap.isOpened():
+FRAME_CHECK = 20
+ear_counter = 0
+
+while True:
     ret, frame = cap.read()
     if not ret:
         break
-
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb)
 
     if results.multi_face_landmarks:
         for face_landmarks in results.multi_face_landmarks:
-            # Calculate EAR
-            leftEAR = calculate_EAR(face_landmarks.landmark, LEFT_EYE)
-            rightEAR = calculate_EAR(face_landmarks.landmark, RIGHT_EYE)
-            EAR = (leftEAR + rightEAR) / 2.0
+            lm = face_landmarks.landmark
 
-            # Calculate MAR
-            MAR = calculate_MAR(face_landmarks.landmark)
+            # EAR
+            ear_left = calculate_EAR(lm, LEFT_EYE)
+            ear_right = calculate_EAR(lm, RIGHT_EYE)
+            ear_avg = (ear_left + ear_right) / 2.0
 
-            # Log into CSV
-            with open(csv_file, "a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([time.time(), EAR, MAR])
+            # MAR
+            mar = calculate_MAR(lm)
 
             # Drowsiness detection
-            if EAR < EAR_THRESHOLD:
+            if ear_avg < EAR_THRESHOLD:
                 ear_counter += 1
-                if ear_counter >= CONSEC_FRAMES:
-                    cv2.putText(frame, "DROWSINESS DETECTED!", (50, 50),
+                if ear_counter >= FRAME_CHECK:
+                    cv2.putText(frame, "DROWSINESS DETECTED!", (50, 100),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                    play_alert()
+                    winsound.Beep(1000, 800)
             else:
                 ear_counter = 0
 
             # Yawning detection
-            if MAR > MAR_THRESHOLD:
-                mar_counter += 1
-                if mar_counter >= CONSEC_FRAMES:
-                    cv2.putText(frame, "YAWNING DETECTED!", (50, 100),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                    play_alert()
-            else:
-                mar_counter = 0
+            if mar > MAR_THRESHOLD:
+                cv2.putText(frame, "YAWNING DETECTED!", (50, 150),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                winsound.Beep(1500, 800)
 
-    cv2.imshow("Driver Vigilance Monitoring", frame)
+            # Display ratios
+            cv2.putText(frame, f"EAR: {ear_avg:.3f}", (30, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, f"MAR: {mar:.3f}", (30, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-    # Exit on ESC
-    if cv2.waitKey(1) & 0xFF == 27:
+    cv2.imshow("Driver Vigilance System", frame)
+    if cv2.waitKey(1) & 0xFF == 27:  # ESC to quit
         break
 
 cap.release()
