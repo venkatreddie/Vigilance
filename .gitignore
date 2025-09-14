@@ -45,3 +45,14 @@ desktop.ini
 # OneDrive temporary files
 *.lnk
 ~$*
+
+
+# Ignore large/binary files
+*.mp4
+*.avi
+*.mkv
+*.wav
+*.mp3
+*.png
+*.jpg
+*.jpeg
