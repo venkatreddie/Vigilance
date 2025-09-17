@@ -1,152 +1,129 @@
 import cv2
 import mediapipe as mp
 import numpy as np
+import time
 import winsound
 import csv
-from datetime import datetime
+import os
 
-# Initialize Mediapipe
+# ===============================
+# CONFIG
+# ===============================
+EAR_THRESHOLD = 0.20   # Adjust after testing EAR live values
+MAR_THRESHOLD = 0.60   # Adjust after testing MAR live values
+CLOSED_CONSEC_FRAMES = 15  # Number of frames for drowsiness detection
+
+LOG_FILE = "log.csv"
+
+# ===============================
+# MEDIAPIPE
+# ===============================
 mp_face_mesh = mp.solutions.face_mesh
-mp_hands = mp.solutions.hands
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True)
-hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.6)
+face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
 
-# EAR / MAR landmark indices
+# Landmark indices
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
-RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-MOUTH_TOP = 13
-MOUTH_BOTTOM = 14
-MOUTH_LEFT = 78
-MOUTH_RIGHT = 308
+RIGHT_EYE = [263, 387, 385, 362, 380, 373]
+MOUTH = [78, 308, 13, 14, 82, 312]
 
-# Thresholds
-EAR_THRESHOLD = 0.25   # Eye Aspect Ratio
-MAR_THRESHOLD = 0.6    # Mouth Aspect Ratio
-
-# Accident probability
-probability = 0
-
-# --- CSV Logging ---
-log_file = "log.csv"
-with open(log_file, mode="w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["Time", "Alert_Type", "Accident_Probability"])
-
-def log_event(alert_type, probability):
-    """Log events with timestamp into CSV"""
-    with open(log_file, mode="a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), alert_type, probability])
-
-# --- Utility Functions ---
-def euclidean_dist(a, b):
-    return np.linalg.norm(a - b)
+# ===============================
+# FUNCTIONS
+# ===============================
+def euclidean_distance(pt1, pt2):
+    return np.linalg.norm(pt1 - pt2)
 
 def calculate_EAR(landmarks, eye_indices):
-    left = np.array([landmarks[eye_indices[0]].x, landmarks[eye_indices[0]].y])
-    right = np.array([landmarks[eye_indices[3]].x, landmarks[eye_indices[3]].y])
-    top1 = np.array([landmarks[eye_indices[1]].x, landmarks[eye_indices[1]].y])
-    top2 = np.array([landmarks[eye_indices[2]].x, landmarks[eye_indices[2]].y])
-    bottom1 = np.array([landmarks[eye_indices[4]].x, landmarks[eye_indices[4]].y])
-    bottom2 = np.array([landmarks[eye_indices[5]].x, landmarks[eye_indices[5]].y])
-    vertical = (euclidean_dist(top1, bottom1) + euclidean_dist(top2, bottom2)) / 2.0
-    horizontal = euclidean_dist(left, right)
-    return vertical / horizontal
+    eye = np.array([[landmarks[p].x, landmarks[p].y] for p in eye_indices])
+    A = euclidean_distance(eye[1], eye[5])
+    B = euclidean_distance(eye[2], eye[4])
+    C = euclidean_distance(eye[0], eye[3])
+    return (A + B) / (2.0 * C)
 
-def calculate_MAR(landmarks):
-    top = np.array([landmarks[MOUTH_TOP].x, landmarks[MOUTH_TOP].y])
-    bottom = np.array([landmarks[MOUTH_BOTTOM].x, landmarks[MOUTH_BOTTOM].y])
-    left = np.array([landmarks[MOUTH_LEFT].x, landmarks[MOUTH_LEFT].y])
-    right = np.array([landmarks[MOUTH_RIGHT].x, landmarks[MOUTH_RIGHT].y])
-    vertical = euclidean_dist(top, bottom)
-    horizontal = euclidean_dist(left, right)
-    return vertical / horizontal
+def calculate_MAR(landmarks, mouth_indices):
+    mouth = np.array([[landmarks[p].x, landmarks[p].y] for p in mouth_indices])
+    A = euclidean_distance(mouth[1], mouth[5])
+    B = euclidean_distance(mouth[0], mouth[3])
+    return A / B
 
-# Video capture
+def log_event(event_type, probability):
+    file_exists = os.path.isfile(LOG_FILE)
+    with open(LOG_FILE, mode="a", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["Timestamp", "Event", "Probability"])
+        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), event_type, probability])
+
+# ===============================
+# MAIN LOOP
+# ===============================
 cap = cv2.VideoCapture(0)
+
+closed_frames = 0
+probability = 0
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
 
-    h, w, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb_frame)
 
-    # Process face and hands
-    face_results = face_mesh.process(rgb_frame)
-    hand_results = hands.process(rgb_frame)
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            lm = face_landmarks.landmark
 
-    phone_usage = False
-    EAR, MAR = None, None
+            # EAR for both eyes
+            left_EAR = calculate_EAR(lm, LEFT_EYE)
+            right_EAR = calculate_EAR(lm, RIGHT_EYE)
+            EAR = (left_EAR + right_EAR) / 2.0
 
-    if face_results.multi_face_landmarks:
-        for face_landmarks in face_results.multi_face_landmarks:
-            landmarks = face_landmarks.landmark
+            # MAR for mouth
+            MAR = calculate_MAR(lm, MOUTH)
 
-            # EAR calculation
-            EAR_left = calculate_EAR(landmarks, LEFT_EYE)
-            EAR_right = calculate_EAR(landmarks, RIGHT_EYE)
-            EAR = (EAR_left + EAR_right) / 2.0
+            # =======================
+            # DISPLAY LIVE VALUES
+            # =======================
+            cv2.putText(frame, f"EAR: {EAR:.2f}", (50, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(frame, f"MAR: {MAR:.2f}", (50, 110),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
-            # MAR calculation
-            MAR = calculate_MAR(landmarks)
-
-            # Face bounding box
-            xs = [lm.x for lm in landmarks]
-            ys = [lm.y for lm in landmarks]
-            face_xmin, face_ymin = int(min(xs) * w), int(min(ys) * h)
-            face_xmax, face_ymax = int(max(xs) * w), int(max(ys) * h)
-            cv2.rectangle(frame, (face_xmin, face_ymin), (face_xmax, face_ymax), (255, 255, 255), 2)
-
-            # --- Drowsiness Detection ---
+            # =======================
+            # DROWSINESS DETECTION
+            # =======================
             if EAR < EAR_THRESHOLD:
-                cv2.putText(frame, "DROWSINESS DETECTED", (50, 120),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                winsound.Beep(1000, 500)
-                probability = min(probability + 5, 100)
-                log_event("Drowsiness", probability)
+                closed_frames += 1
+                if closed_frames >= CLOSED_CONSEC_FRAMES:
+                    cv2.putText(frame, "DROWSINESS DETECTED!", (50, 150),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                    winsound.Beep(1000, 500)
+                    probability = min(probability + 10, 100)
+                    log_event("Drowsiness", probability)
+            else:
+                closed_frames = 0
 
-            # --- Yawning Detection ---
+            # =======================
+            # YAWNING DETECTION
+            # =======================
             if MAR > MAR_THRESHOLD:
-                cv2.putText(frame, "YAWNING DETECTED", (50, 160),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                winsound.Beep(800, 500)
+                cv2.putText(frame, "YAWNING DETECTED!", (50, 190),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                winsound.Beep(1500, 500)
                 probability = min(probability + 5, 100)
                 log_event("Yawning", probability)
 
-            # --- Phone Usage Detection ---
-            if hand_results.multi_hand_landmarks:
-                for hand_landmarks in hand_results.multi_hand_landmarks:
-                    for lm in hand_landmarks.landmark:
-                        x, y = int(lm.x * w), int(lm.y * h)
-                        if face_xmin < x < face_xmax and face_ymin < y < face_ymax:
-                            phone_usage = True
+            # =======================
+            # PROBABILITY BAR
+            # =======================
+            cv2.rectangle(frame, (50, 30), (350, 60), (255, 255, 255), -1)
+            cv2.rectangle(frame, (50, 30), (50 + int(3 * probability), 60), (0, 0, 255), -1)
+            cv2.putText(frame, f"Accident Risk: {probability}%", (360, 55),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
 
-            if phone_usage:
-                cv2.putText(frame, "PHONE USAGE DETECTED", (50, 200),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                winsound.Beep(1200, 500)
-                probability = min(probability + 10, 100)
-                log_event("Phone Usage", probability)
+    cv2.imshow("Driver Vigilance Monitoring", frame)
 
-    # Decrease probability if no issues
-    if EAR is not None and MAR is not None and not phone_usage:
-        probability = max(probability - 2, 0)
-
-    # Probability bar (TOP SIDE of frame)
-    bar_x, bar_y = 50, 40
-    bar_width, bar_height = 400, 30
-    cv2.rectangle(frame, (bar_x, bar_y),
-                  (bar_x + bar_width, bar_y + bar_height), (255, 255, 255), 2)
-    cv2.rectangle(frame, (bar_x, bar_y),
-                  (bar_x + int(bar_width * (probability / 100)), bar_y + bar_height),
-                  (0, 0, 255), -1)
-    cv2.putText(frame, f"Accident Probability: {probability}%",
-                (50, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-    cv2.imshow("Accident Probability Monitor", frame)
-    if cv2.waitKey(1) & 0xFF == 27:  # ESC to exit
+    if cv2.waitKey(1) & 0xFF == 27:  # ESC to quit
         break
 
 cap.release()
