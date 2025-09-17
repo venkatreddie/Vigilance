@@ -9,11 +9,9 @@ import os
 # ===============================
 # CONFIG
 # ===============================
-EAR_THRESHOLD = 0.20   # Adjust after testing EAR live values
-MAR_THRESHOLD = 0.60   # Adjust after testing MAR live values
-CLOSED_CONSEC_FRAMES = 15  # Number of frames for drowsiness detection
-
+CLOSED_CONSEC_FRAMES = 15  # Frames for drowsiness detection
 LOG_FILE = "log.csv"
+CALIBRATION_TIME = 5  # Seconds for auto-calibration
 
 # ===============================
 # MEDIAPIPE
@@ -61,6 +59,14 @@ cap = cv2.VideoCapture(0)
 closed_frames = 0
 probability = 0
 
+# Calibration variables
+ear_values = []
+mar_values = []
+EAR_THRESHOLD, MAR_THRESHOLD = None, None
+calibration_start = time.time()
+
+print("🔧 Calibration started... Please keep eyes open and mouth closed for a few seconds.")
+
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
@@ -73,53 +79,64 @@ while cap.isOpened():
         for face_landmarks in results.multi_face_landmarks:
             lm = face_landmarks.landmark
 
-            # EAR for both eyes
+            # EAR and MAR
             left_EAR = calculate_EAR(lm, LEFT_EYE)
             right_EAR = calculate_EAR(lm, RIGHT_EYE)
             EAR = (left_EAR + right_EAR) / 2.0
-
-            # MAR for mouth
             MAR = calculate_MAR(lm, MOUTH)
 
-            # =======================
-            # DISPLAY LIVE VALUES
-            # =======================
-            cv2.putText(frame, f"EAR: {EAR:.2f}", (50, 80),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            cv2.putText(frame, f"MAR: {MAR:.2f}", (50, 110),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-
-            # =======================
-            # DROWSINESS DETECTION
-            # =======================
-            if EAR < EAR_THRESHOLD:
-                closed_frames += 1
-                if closed_frames >= CLOSED_CONSEC_FRAMES:
-                    cv2.putText(frame, "DROWSINESS DETECTED!", (50, 150),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
-                    winsound.Beep(1000, 500)
-                    probability = min(probability + 10, 100)
-                    log_event("Drowsiness", probability)
+            # During calibration
+            if time.time() - calibration_start < CALIBRATION_TIME:
+                ear_values.append(EAR)
+                mar_values.append(MAR)
+                cv2.putText(frame, "Calibrating... Keep eyes open, mouth closed", (50, 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
             else:
-                closed_frames = 0
+                if EAR_THRESHOLD is None and MAR_THRESHOLD is None:
+                    # Set thresholds based on averages
+                    EAR_THRESHOLD = np.mean(ear_values) * 0.75  # 75% of normal open EAR
+                    MAR_THRESHOLD = np.mean(mar_values) * 1.5   # 150% of normal closed MAR
+                    print(f"✅ Calibration complete. EAR_THRESHOLD={EAR_THRESHOLD:.2f}, MAR_THRESHOLD={MAR_THRESHOLD:.2f}")
 
-            # =======================
-            # YAWNING DETECTION
-            # =======================
-            if MAR > MAR_THRESHOLD:
-                cv2.putText(frame, "YAWNING DETECTED!", (50, 190),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
-                winsound.Beep(1500, 500)
-                probability = min(probability + 5, 100)
-                log_event("Yawning", probability)
+                # =======================
+                # DISPLAY LIVE VALUES
+                # =======================
+                cv2.putText(frame, f"EAR: {EAR:.2f}", (50, 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(frame, f"MAR: {MAR:.2f}", (50, 110),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
-            # =======================
-            # PROBABILITY BAR
-            # =======================
-            cv2.rectangle(frame, (50, 30), (350, 60), (255, 255, 255), -1)
-            cv2.rectangle(frame, (50, 30), (50 + int(3 * probability), 60), (0, 0, 255), -1)
-            cv2.putText(frame, f"Accident Risk: {probability}%", (360, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+                # =======================
+                # DROWSINESS DETECTION
+                # =======================
+                if EAR < EAR_THRESHOLD:
+                    closed_frames += 1
+                    if closed_frames >= CLOSED_CONSEC_FRAMES:
+                        cv2.putText(frame, "DROWSINESS DETECTED!", (50, 150),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                        winsound.Beep(1000, 500)
+                        probability = min(probability + 10, 100)
+                        log_event("Drowsiness", probability)
+                else:
+                    closed_frames = 0
+
+                # =======================
+                # YAWNING DETECTION
+                # =======================
+                if MAR > MAR_THRESHOLD:
+                    cv2.putText(frame, "YAWNING DETECTED!", (50, 190),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                    winsound.Beep(1500, 500)
+                    probability = min(probability + 5, 100)
+                    log_event("Yawning", probability)
+
+                # =======================
+                # PROBABILITY BAR
+                # =======================
+                cv2.rectangle(frame, (50, 30), (350, 60), (255, 255, 255), -1)
+                cv2.rectangle(frame, (50, 30), (50 + int(3 * probability), 60), (0, 0, 255), -1)
+                cv2.putText(frame, f"Accident Risk: {probability}%", (360, 55),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
 
     cv2.imshow("Driver Vigilance Monitoring", frame)
 
