@@ -19,7 +19,7 @@ if not os.path.exists(log_file):
 
 # Buzzer function
 def play_buzzer():
-    winsound.Beep(1000, 300)  # shorter beep for continuous effect
+    winsound.Beep(1000, 500)  # frequency=1000Hz, duration=500ms
 
 # Head pose estimation
 def get_head_pose(landmarks, frame_w, frame_h):
@@ -56,7 +56,7 @@ def get_head_pose(landmarks, frame_w, frame_h):
 
 # Variables
 distraction_start_time = None
-distraction_threshold = 10  # must be distracted for 10s before triggering
+distraction_threshold = 2   # seconds before triggering alert (for smoother detection)
 alert_active = False
 
 cap = cv2.VideoCapture(0)
@@ -77,9 +77,8 @@ while True:
             cv2.putText(frame, f"Yaw: {yaw:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
             cv2.putText(frame, f"Pitch: {pitch:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
 
-            distracted = abs(yaw) > 20 or pitch < -10  # looking side or down
-
-            if distracted:
+            # Detect distraction: left/right or downward
+            if abs(yaw) > 20 or pitch > 15:   # pitch > 15 = looking downward
                 if distraction_start_time is None:
                     distraction_start_time = time.time()
                 elif time.time() - distraction_start_time >= distraction_threshold:
@@ -88,14 +87,17 @@ while True:
                 distraction_start_time = None
                 alert_active = False
 
-            # Alerts
+            # If alert is active
             if alert_active:
+                # Show warning board
                 cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
-                cv2.putText(frame, "⚠ DISTRACTION DETECTED! ⚠", (100, 100),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 3)
-                play_buzzer()  # continuous buzzing while distracted
+                cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
 
-                # Log once when alert becomes active
+                # Play buzzer
+                play_buzzer()
+
+                # Log event
                 with open(log_file, "a", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), yaw, pitch, "Distraction Detected"])
