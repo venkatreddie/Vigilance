@@ -56,8 +56,9 @@ def get_head_pose(landmarks, frame_w, frame_h):
 
 # Variables
 distraction_start_time = None
-alert_triggered = False
-distraction_threshold = 10  # seconds
+last_alert_time = 0
+alert_cooldown = 5       # seconds between alerts
+distraction_threshold = 10  # must be distracted for 10s before triggering
 
 cap = cv2.VideoCapture(0)
 
@@ -77,25 +78,29 @@ while True:
             cv2.putText(frame, f"Yaw: {yaw:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
             cv2.putText(frame, f"Pitch: {pitch:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
 
-            # Distraction logic
-            if abs(yaw) > 20 or pitch < -15:
+            # Distraction logic (left/right OR downward head pose)
+            if abs(yaw) > 20 or pitch < -10:  # threshold tuned for down head
                 if distraction_start_time is None:
                     distraction_start_time = time.time()
                 elif time.time() - distraction_start_time >= distraction_threshold:
-                    alert_triggered = True
+                    # Check cooldown
+                    if time.time() - last_alert_time >= alert_cooldown:
+                        last_alert_time = time.time()
+
+                        # Trigger alert
+                        cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
+                        cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
+                        play_buzzer()
+
+                        # Log event
+                        with open(log_file, "a", newline="") as f:
+                            writer = csv.writer(f)
+                            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), yaw, pitch, "Distraction Detected"])
             else:
-                distraction_start_time = None
-                alert_triggered = False
+                distraction_start_time = None  # reset if focused
 
-            if alert_triggered:
-                cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
-                cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
-                play_buzzer()
-
-                with open(log_file, "a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), yaw, pitch, "Distraction Detected"])
-
+    # Show video feed
     cv2.imshow("Driver Vigilance - Distraction Detection", frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
