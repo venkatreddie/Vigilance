@@ -42,7 +42,7 @@ def get_head_pose(landmarks, frame_w, frame_h):
     camera_matrix = np.array([[focal_length, 0, center[0]],
                               [0, focal_length, center[1]],
                               [0, 0, 1]], dtype="double")
-    dist_coeffs = np.zeros((4,1)) 
+    dist_coeffs = np.zeros((4,1))
 
     success, rotation_vector, translation_vector = cv2.solvePnP(
         model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
@@ -56,7 +56,7 @@ def get_head_pose(landmarks, frame_w, frame_h):
 
 # Variables
 distraction_start_time = None
-distraction_threshold = 2   # seconds before triggering alert (for smoother detection)
+distraction_threshold = 10  # must be distracted for 10s before triggering
 alert_active = False
 
 cap = cv2.VideoCapture(0)
@@ -77,8 +77,8 @@ while True:
             cv2.putText(frame, f"Yaw: {yaw:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
             cv2.putText(frame, f"Pitch: {pitch:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
 
-            # Detect distraction: left/right or downward
-            if abs(yaw) > 20 or pitch > 15:   # pitch > 15 = looking downward
+            # Distraction logic (left/right OR downward head pose)
+            if abs(yaw) > 20 or pitch < -10:  
                 if distraction_start_time is None:
                     distraction_start_time = time.time()
                 elif time.time() - distraction_start_time >= distraction_threshold:
@@ -87,14 +87,11 @@ while True:
                 distraction_start_time = None
                 alert_active = False
 
-            # If alert is active
+            # If alert is active → show continuously
             if alert_active:
-                # Show warning board
                 cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
                 cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
-
-                # Play buzzer
                 play_buzzer()
 
                 # Log event
