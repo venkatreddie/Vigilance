@@ -1,117 +1,100 @@
 import cv2
 import mediapipe as mp
-import numpy as np
 import time
+import pygame
 import csv
-import os
-import winsound
+from datetime import datetime
 
-# Mediapipe setup
+# Initialize pygame mixer for sound alerts
+pygame.mixer.init()
+alert_sound = pygame.mixer.Sound("alerts/beep.wav")
+
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
 
-# CSV logging setup
-log_file = "distraction_log.csv"
-if not os.path.exists(log_file):
-    with open(log_file, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Timestamp", "Yaw", "Pitch", "Event"])
-
-# Buzzer function
-def play_buzzer():
-    winsound.Beep(1000, 700)
-
-# Head pose estimation
-def get_head_pose(landmarks, frame_w, frame_h):
-    nose = (landmarks[1].x * frame_w, landmarks[1].y * frame_h)
-    chin = (landmarks[199].x * frame_w, landmarks[199].y * frame_h)
-    left_eye = (landmarks[33].x * frame_w, landmarks[33].y * frame_h)
-    right_eye = (landmarks[263].x * frame_w, landmarks[263].y * frame_h)
-    mouth_left = (landmarks[61].x * frame_w, landmarks[61].y * frame_h)
-    mouth_right = (landmarks[291].x * frame_w, landmarks[291].y * frame_h)
-
-    image_points = np.array([nose, chin, left_eye, right_eye, mouth_left, mouth_right], dtype="double")
-    model_points = np.array([
-        (0.0, 0.0, 0.0), (0.0, -330.0, -65.0),
-        (-225.0, 170.0, -135.0), (225.0, 170.0, -135.0),
-        (-150.0, -150.0, -125.0), (150.0, -150.0, -125.0)
-    ])
-
-    focal_length = frame_w
-    center = (frame_w / 2, frame_h / 2)
-    camera_matrix = np.array([
-        [focal_length, 0, center[0]],
-        [0, focal_length, center[1]],
-        [0, 0, 1]
-    ], dtype="double")
-    dist_coeffs = np.zeros((4, 1))
-
-    success, rotation_vector, translation_vector = cv2.solvePnP(
-        model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-    )
-
-    rot_mat, _ = cv2.Rodrigues(rotation_vector)
-    proj_mat = np.hstack((rot_mat, translation_vector))
-    _, _, _, _, _, _, eulerAngles = cv2.decomposeProjectionMatrix(proj_mat)
-
-    yaw, pitch, roll = [float(angle) for angle in eulerAngles]
-    return yaw, pitch
-
-# Variables
-distraction_start_time = None
-distraction_active = False
-distraction_logged = False
-distraction_threshold = 10  # seconds
-
 cap = cv2.VideoCapture(0)
+
+# Logging setup
+log_file = "distraction_log.csv"
+with open(log_file, mode="a", newline="") as file:
+    writer = csv.writer(file)
+    writer.writerow(["Timestamp", "Yaw", "Pitch", "Event"])
+
+# State variables
+distraction_active = False
+distraction_start = None
+cooldown_active = False
+
+def log_event(event, yaw, pitch):
+    with open(log_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), round(yaw, 2), round(pitch, 2), event])
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
-    h, w, _ = frame.shape
+
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(rgb_frame)
 
+    h, w, _ = frame.shape
+
+    yaw, pitch = 0, 0  # Default
+
     if results.multi_face_landmarks:
         for face_landmarks in results.multi_face_landmarks:
-            yaw, pitch = get_head_pose(face_landmarks.landmark, w, h)
+            # Get landmarks for nose (useful for rough head pose)
+            nose_tip = face_landmarks.landmark[1]  # Nose tip index
+            left_eye = face_landmarks.landmark[33]  # Left eye corner
+            right_eye = face_landmarks.landmark[263]  # Right eye corner
 
-            # Show values
-            cv2.putText(frame, f"Yaw: {yaw:.1f}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            cv2.putText(frame, f"Pitch: {pitch:.1f}", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            # Convert to pixel coordinates
+            nx, ny = int(nose_tip.x * w), int(nose_tip.y * h)
+            lx, ly = int(left_eye.x * w), int(left_eye.y * h)
+            rx, ry = int(right_eye.x * w), int(right_eye.y * h)
 
-            # Check distraction (side or down)
-            if abs(yaw) > 20 or pitch > 10:
-                if distraction_start_time is None:
-                    distraction_start_time = time.time()
-                elif not distraction_active and (time.time() - distraction_start_time >= distraction_threshold):
+            # Rough yaw (left/right)
+            yaw = (lx - rx)
+
+            # Rough pitch (up/down)
+            pitch = (ny - ((ly + ry) // 2))
+
+            # Scale values to look natural
+            yaw = yaw * 0.3
+            pitch = pitch * 0.3
+
+            # Show debug values
+            cv2.putText(frame, f"Yaw: {round(yaw,1)}", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+            cv2.putText(frame, f"Pitch: {round(pitch,1)}", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+
+            # --- Distraction detection ---
+            if abs(yaw) > 25 or pitch > 15:  # Sideways OR looking down
+                if not distraction_active:
+                    distraction_start = time.time()
                     distraction_active = True
-                    distraction_logged = False  # reset logging for new event
+                    cooldown_active = False
+                else:
+                    elapsed = time.time() - distraction_start
+                    if elapsed > 10:  # Trigger only after 10s
+                        if not cooldown_active:
+                            log_event("Distraction Detected", yaw, pitch)
+                            alert_sound.play()
+                            cooldown_active = True
 
-                # If distraction active, trigger alert continuously
-                if distraction_active:
-                    cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
-                    cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
-                    play_buzzer()
-
-                    if not distraction_logged:
-                        with open(log_file, "a", newline="") as f:
-                            writer = csv.writer(f)
-                            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                             yaw, pitch, "Distraction"])
-                        distraction_logged = True
-
+                        # Show alert on screen
+                        cv2.rectangle(frame, (50, 80), (w-50, 160), (0,0,255), -1)
+                        cv2.putText(frame, "DISTRACTION DETECTED!", (60, 140),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
             else:
                 # Reset when looking straight
-                distraction_start_time = None
                 distraction_active = False
+                distraction_start = None
+                cooldown_active = False
 
     cv2.imshow("Driver Distraction Detection", frame)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
+
+    if cv2.waitKey(1) & 0xFF == 27:
         break
 
 cap.release()
