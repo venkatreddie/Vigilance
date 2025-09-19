@@ -5,127 +5,249 @@ import csv
 import os
 import winsound
 import numpy as np
+import math
+from collections import deque
 
-# Mediapipe setup
+# ====== CONFIG ======
+LOG_FILE = "distraction_log.csv"
+
+# Pose thresholds (enter distraction / exit distraction = hysteresis)
+DISTRACTION_YAW = 25.0      # degrees -> enter distraction if abs(yaw) > this
+DISTRACTION_PITCH = 15.0    # degrees -> enter distraction if pitch > this (looking down)
+
+STRAIGHT_YAW = 15.0         # degrees -> considered straight if abs(yaw) <= this
+STRAIGHT_PITCH = 8.0        # degrees -> considered straight if pitch <= this
+
+# Timing
+DISTRACTION_HOLD = 10.0     # seconds of continuous distracted pose before alert triggers
+STRAIGHT_COOLDOWN = 2.0     # seconds of comfortable straight pose required to clear alert
+ALERT_REPEAT_INTERVAL = 3.0 # seconds between repeated beeps while distracted
+
+# Beep settings (Windows)
+BEEP_FREQ = 2000            # Hz
+BEEP_DUR_MS = 200          # ms (short beep so frames continue updating)
+
+# Smoothing
+SMOOTH_WINDOW = 6          # number of recent angle samples to average
+
+# ====== SETUP ======
+# Mediapipe face mesh
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
+face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-# CSV logging setup
-log_file = "distraction_log.csv"
-if not os.path.exists(log_file):
-    with open(log_file, "w", newline="") as f:
+# Prepare log file (single persistent CSV)
+if not os.path.exists(LOG_FILE):
+    with open(LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Timestamp", "Yaw", "Pitch", "Alert"])
+        writer.writerow(["Timestamp", "Yaw_deg", "Pitch_deg", "Event"])
 
-# Buzzer function
-def play_alert():
-    winsound.Beep(2000, 500)  # frequency=2000Hz, duration=500ms
+# Utility: compute Euler angles (roll, pitch, yaw) from rotation matrix
+def rotationMatrixToEulerAngles(R):
+    # R is 3x3 rotation matrix
+    sy = math.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
+    singular = sy < 1e-6
+    if not singular:
+        x = math.atan2(R[2,1], R[2,2])   # roll
+        y = math.atan2(-R[2,0], sy)      # pitch
+        z = math.atan2(R[1,0], R[0,0])   # yaw
+    else:
+        x = math.atan2(-R[1,2], R[1,1])
+        y = math.atan2(-R[2,0], sy)
+        z = 0
+    # convert to degrees
+    return np.degrees([x, y, z])  # roll, pitch, yaw
 
-# Head pose estimation
-def get_head_pose(landmarks, frame_w, frame_h):
-    nose = (landmarks[1].x * frame_w, landmarks[1].y * frame_h)
-    left_eye = (landmarks[33].x * frame_w, landmarks[33].y * frame_h)
-    right_eye = (landmarks[263].x * frame_w, landmarks[263].y * frame_h)
-    mouth_left = (landmarks[61].x * frame_w, landmarks[61].y * frame_h)
-    mouth_right = (landmarks[291].x * frame_w, landmarks[291].y * frame_h)
-    chin = (landmarks[199].x * frame_w, landmarks[199].y * frame_h)
+# Beep (non-blocking feel via short beep repeated)
+def beep():
+    try:
+        winsound.Beep(BEEP_FREQ, BEEP_DUR_MS)
+    except Exception:
+        pass
 
-    image_points = np.array([nose, chin, left_eye, right_eye, mouth_left, mouth_right], dtype="double")
-    model_points = np.array([
-        (0.0, 0.0, 0.0), (0.0, -330.0, -65.0),
-        (-225.0, 170.0, -135.0), (225.0, 170.0, -135.0),
-        (-150.0, -150.0, -125.0), (150.0, -150.0, -125.0)
-    ])
+# Head-pose estimation using selected MediaPipe FaceMesh indexes
+# Model points (3D) approximations (same across examples)
+MODEL_POINTS = np.array([
+    (0.0, 0.0, 0.0),        # nose tip
+    (0.0, -330.0, -65.0),   # chin
+    (-225.0, 170.0, -135.0),# left eye left corner
+    (225.0, 170.0, -135.0), # right eye right corner
+    (-150.0, -150.0, -125.0),# left mouth corner
+    (150.0, -150.0, -125.0)  # right mouth corner
+], dtype=np.float64)
 
-    focal_length = frame_w
-    center = (frame_w / 2, frame_h / 2)
-    camera_matrix = np.array([[focal_length, 0, center[0]],
-                              [0, focal_length, center[1]],
-                              [0, 0, 1]], dtype="double")
-    dist_coeffs = np.zeros((4, 1))
+# Indices in MediaPipe FaceMesh to use for image_points:
+# [nose_tip, chin, left_eye_outer, right_eye_outer, mouth_left, mouth_right]
+# MediaPipe FaceMesh common indices: 1 (nose tip), 199 (chin), 33 (left eye outer),
+# 263 (right eye outer), 61 (mouth left), 291 (mouth right)
+LMKS_IDX = [1, 199, 33, 263, 61, 291]
 
-    success, rotation_vector, translation_vector = cv2.solvePnP(
-        model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-    )
+# smoothing buffers
+yaw_buf = deque(maxlen=SMOOTH_WINDOW)
+pitch_buf = deque(maxlen=SMOOTH_WINDOW)
 
-    rotation_mat, _ = cv2.Rodrigues(rotation_vector)
-    pose_mat = cv2.hconcat((rotation_mat, translation_vector))
-    _, _, _, _, _, _, eulerAngles = cv2.decomposeProjectionMatrix(pose_mat)
-    yaw, pitch, roll = [angle[0] for angle in eulerAngles]
-    return yaw, pitch
+# state vars
+distraction_start = None
+straight_start = None
+alert_active = False
+logged_this_event = False
+last_beep_time = 0.0
 
-# Variables
-distraction_start_time = None
-distraction_active = False
-distraction_logged = False
-last_alert_time = 0
-
-# Settings
-distraction_threshold = 10   # seconds before triggering alert
-alert_repeat_interval = 5    # repeat alert every 5 sec while distracted
-straight_cooldown = 2        # must be straight for 2 sec to reset
-
-straight_start_time = None
-
+# Video capture
 cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    raise RuntimeError("Cannot open camera")
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb)
+
+        # default display values
+        display_yaw = 0.0
+        display_pitch = 0.0
+
+        face_detected = False
+
+        if results.multi_face_landmarks and len(results.multi_face_landmarks) > 0:
+            face_detected = True
+            fml = results.multi_face_landmarks[0]
+            lm = fml.landmark
+
+            # build 2D image points from selected landmarks
+            try:
+                image_points = np.array([
+                    (lm[LMKS_IDX[0]].x * w, lm[LMKS_IDX[0]].y * h),  # nose tip
+                    (lm[LMKS_IDX[1]].x * w, lm[LMKS_IDX[1]].y * h),  # chin
+                    (lm[LMKS_IDX[2]].x * w, lm[LMKS_IDX[2]].y * h),  # left eye
+                    (lm[LMKS_IDX[3]].x * w, lm[LMKS_IDX[3]].y * h),  # right eye
+                    (lm[LMKS_IDX[4]].x * w, lm[LMKS_IDX[4]].y * h),  # mouth left
+                    (lm[LMKS_IDX[5]].x * w, lm[LMKS_IDX[5]].y * h)   # mouth right
+                ], dtype=np.float64)
+
+                # camera internals
+                focal_length = w
+                center = (w/2.0, h/2.0)
+                camera_matrix = np.array([
+                    [focal_length, 0, center[0]],
+                    [0, focal_length, center[1]],
+                    [0, 0, 1]
+                ], dtype=np.float64)
+                dist_coeffs = np.zeros((4,1))  # assume no lens distortion
+
+                success, rotation_vector, translation_vector = cv2.solvePnP(
+                    MODEL_POINTS, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
+                )
+
+                if success:
+                    R_mat, _ = cv2.Rodrigues(rotation_vector)
+                    roll_deg, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R_mat)
+                    # mapping: roll (x), pitch (y), yaw (z)
+                    display_yaw = yaw_deg
+                    display_pitch = pitch_deg
+
+                    # smoothing (reduces jitter)
+                    yaw_buf.append(display_yaw)
+                    pitch_buf.append(display_pitch)
+                    smooth_yaw = float(np.mean(yaw_buf))
+                    smooth_pitch = float(np.mean(pitch_buf))
+
+                    # draw smoothed numeric debug on frame
+                    cv2.putText(frame, f"yaw:{smooth_yaw:6.2f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+                    cv2.putText(frame, f"pitch:{smooth_pitch:6.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+
+                    # --- distraction decision with hysteresis ---
+                    now = time.time()
+                    # check if current pose qualifies as distracted (enter thresholds)
+                    is_distracted_now = (abs(smooth_yaw) > DISTRACTION_YAW) or (smooth_pitch > DISTRACTION_PITCH)
+
+                    # check if current pose qualifies as comfortably straight (exit thresholds)
+                    is_straight_now = (abs(smooth_yaw) <= STRAIGHT_YAW) and (abs(smooth_pitch) <= STRAIGHT_PITCH)
+
+                    if is_distracted_now:
+                        straight_start = None  # reset straight counter
+                        if distraction_start is None:
+                            distraction_start = now
+                            logged_this_event = False
+                        else:
+                            # enough continuous duration?
+                            if (now - distraction_start) >= DISTRACTION_HOLD:
+                                # Activate alert
+                                if not alert_active:
+                                    alert_active = True
+                                    # immediate beep + log (once)
+                                    beep_time = now
+                                    try:
+                                        winsound.Beep(BEEP_FREQ, BEEP_DUR_MS)
+                                    except Exception:
+                                        pass
+                                    # log once for the event
+                                    if not logged_this_event:
+                                        with open(LOG_FILE, "a", newline="") as f:
+                                            writer = csv.writer(f)
+                                            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
+                                                             round(smooth_yaw,2), round(smooth_pitch,2), "Distraction Detected"])
+                                        logged_this_event = True
+                                    last_beep = now
+                                # while alert_active, repeat beeps every ALERT_REPEAT_INTERVAL
+                                if alert_active:
+                                    # use a persistent last_beep_time variable (nonlocal)
+                                    try:
+                                        if (now - last_beep_time) >= ALERT_REPEAT_INTERVAL:
+                                            beep()
+                                            last_beep_time = now
+                                    except NameError:
+                                        last_beep_time = now
+                    else:
+                        # not distracted now -> start straight timer or reset
+                        distraction_start = None
+                        # begin straight cooldown only if currently alert_active
+                        if alert_active:
+                            if straight_start is None:
+                                straight_start = now
+                            else:
+                                if (now - straight_start) >= STRAIGHT_COOLDOWN:
+                                    # fully cleared
+                                    alert_active = False
+                                    logged_this_event = False
+                                    straight_start = None
+                                    # reset buffers to avoid stale values
+                                    yaw_buf.clear()
+                                    pitch_buf.clear()
+                                    distraction_start = None
+                else:
+                    # solvePnP failed: don't change state, but avoid spurious alerts
+                    cv2.putText(frame, "pose solvePnP fail", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+
+            except Exception as ex:
+                # landmark indexing or solvePnP error: safe fallback
+                cv2.putText(frame, f"pose error", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+        # end for face landmarks
+        # draw signboard if currently alert_active
+        if alert_active:
+            cv2.rectangle(frame, (80, 40), (w-80, 130), (0, 0, 255), -1)
+            cv2.putText(frame, "⚠ DISTRACTION DETECTED ⚠", (100, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255,255,255), 3)
+    else:
+        # no face detected -> treat as not distracted, reset timers
+        distraction_start = None
+        straight_start = None
+        alert_active = False
+        logged_this_event = False
+        yaw_buf.clear()
+        pitch_buf.clear()
+        cv2.putText(frame, "No face detected", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+
+    # show frame
+    cv2.imshow("Distraction Detection (Day11)", frame)
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q') or key == 27:
         break
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(frame_rgb)
 
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            h, w, _ = frame.shape
-            yaw, pitch = get_head_pose(face_landmarks.landmark, w, h)
-
-            # Show yaw/pitch
-            cv2.putText(frame, f"Yaw: {yaw:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            cv2.putText(frame, f"Pitch: {pitch:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
-            # Distraction condition
-            if abs(yaw) > 20 or pitch > 10:
-                straight_start_time = None  # reset straight timer
-                if distraction_start_time is None:
-                    distraction_start_time = time.time()
-                    distraction_logged = False
-
-                if time.time() - distraction_start_time >= distraction_threshold:
-                    distraction_active = True
-
-                    # Show warning sign
-                    cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
-                    cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
-
-                    # Repeat alert every interval
-                    if time.time() - last_alert_time >= alert_repeat_interval:
-                        play_alert()
-                        last_alert_time = time.time()
-
-                        # Log only once per distraction event
-                        if not distraction_logged:
-                            with open(log_file, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), yaw, pitch, "Distraction Detected"])
-                            distraction_logged = True
-            else:
-                # looking straight
-                if distraction_active:
-                    if straight_start_time is None:
-                        straight_start_time = time.time()
-                    elif time.time() - straight_start_time >= straight_cooldown:
-                        # Reset fully after cooldown
-                        distraction_start_time = None
-                        distraction_active = False
-                        distraction_logged = False
-
-    # Show video feed
-    cv2.imshow("Driver Vigilance - Distraction Detection", frame)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+    face_mesh.close()
