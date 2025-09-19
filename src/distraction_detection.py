@@ -56,7 +56,7 @@ def get_head_pose(landmarks, frame_w, frame_h):
 
 # Variables
 distraction_start_time = None
-distraction_threshold = 10  # must be distracted for 10s before triggering
+distraction_threshold = 10  # distracted for 10s before triggering
 alert_active = False
 
 cap = cv2.VideoCapture(0)
@@ -68,38 +68,38 @@ while True:
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(frame_rgb)
 
+    h, w, _ = frame.shape
+
     if results.multi_face_landmarks:
         for face_landmarks in results.multi_face_landmarks:
-            h, w, _ = frame.shape
             yaw, pitch = get_head_pose(face_landmarks.landmark, w, h)
 
             # Show yaw/pitch
             cv2.putText(frame, f"Yaw: {yaw:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
             cv2.putText(frame, f"Pitch: {pitch:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
 
-            # Distraction logic (left/right OR downward head pose)
-            if abs(yaw) > 20 or pitch < -10:  
+            # Check distraction (left, right, or down)
+            if abs(yaw) > 20 or pitch < -10:
                 if distraction_start_time is None:
                     distraction_start_time = time.time()
                 elif time.time() - distraction_start_time >= distraction_threshold:
                     alert_active = True
             else:
                 distraction_start_time = None
-                alert_active = False
+                alert_active = False  # reset immediately when straight
 
-            # If alert is active → show continuously
+            # If distraction confirmed, alert continuously
             if alert_active:
                 cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
                 cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
                 play_buzzer()
 
-                # Log event
+                # Log only when triggered
                 with open(log_file, "a", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), yaw, pitch, "Distraction Detected"])
 
-    # Show video feed
     cv2.imshow("Driver Vigilance - Distraction Detection", frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
