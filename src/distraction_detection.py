@@ -11,17 +11,18 @@ import math
 LOG_FILE = "distraction_log.csv"
 
 # Pose thresholds
-DISTRACTION_YAW = 20.0      # degrees → side look
-DISTRACTION_PITCH = 15.0    # degrees → looking down
+DISTRACTION_YAW = 20.0      # side look
+DISTRACTION_PITCH = 15.0    # looking down
 STRAIGHT_YAW = 12.0
 STRAIGHT_PITCH = 8.0
 
 # Timing
-ALERT_REPEAT_INTERVAL = 2.0 # seconds between repeated beeps
+DISTRACTION_DURATION = 10.0   # must be distracted for 10s before alert
+ALERT_REPEAT_INTERVAL = 2.0   # repeat beep every 2s if still distracted
 
-# Beep settings (Windows only)
-BEEP_FREQ = 2000            # Hz
-BEEP_DUR_MS = 200           # ms
+# Beep settings
+BEEP_FREQ = 2000
+BEEP_DUR_MS = 200
 
 # ====== SETUP ======
 mp_face_mesh = mp.solutions.face_mesh
@@ -52,12 +53,12 @@ def beep():
         pass
 
 MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),          # nose tip
-    (0.0, -330.0, -65.0),     # chin
-    (-225.0, 170.0, -135.0),  # left eye corner
-    (225.0, 170.0, -135.0),   # right eye corner
-    (-150.0, -150.0, -125.0), # left mouth
-    (150.0, -150.0, -125.0)   # right mouth
+    (0.0, 0.0, 0.0),
+    (0.0, -330.0, -65.0),
+    (-225.0, 170.0, -135.0),
+    (225.0, 170.0, -135.0),
+    (-150.0, -150.0, -125.0),
+    (150.0, -150.0, -125.0)
 ], dtype=np.float64)
 
 LMKS_IDX = [1, 199, 33, 263, 61, 291]
@@ -65,6 +66,7 @@ LMKS_IDX = [1, 199, 33, 263, 61, 291]
 alert_active = False
 logged_this_event = False
 last_beep_time = 0.0
+distraction_start_time = None
 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
@@ -117,24 +119,26 @@ try:
                     is_straight = (abs(yaw_deg) <= STRAIGHT_YAW) and (abs(pitch_deg) <= STRAIGHT_PITCH)
 
                     if is_distracted:
-                        if not alert_active:
-                            alert_active = True
-                            beep()
-                            if not logged_this_event:
-                                with open(LOG_FILE, "a", newline="") as f:
-                                    writer = csv.writer(f)
-                                    writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                     round(yaw_deg,2), round(pitch_deg,2), "Distraction Detected"])
-                                logged_this_event = True
-                            last_beep_time = now
-                        elif (now - last_beep_time) >= ALERT_REPEAT_INTERVAL:
-                            beep()
-                            last_beep_time = now
+                        if distraction_start_time is None:
+                            distraction_start_time = now
+                        elif (now - distraction_start_time) >= DISTRACTION_DURATION:
+                            if not alert_active:
+                                alert_active = True
+                                beep()
+                                if not logged_this_event:
+                                    with open(LOG_FILE, "a", newline="") as f:
+                                        writer = csv.writer(f)
+                                        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
+                                                         round(yaw_deg,2), round(pitch_deg,2), "Distraction Detected"])
+                                    logged_this_event = True
+                                last_beep_time = now
+                            elif (now - last_beep_time) >= ALERT_REPEAT_INTERVAL:
+                                beep()
+                                last_beep_time = now
                     elif is_straight:
-                        if alert_active:
-                            alert_active = False
-                            logged_this_event = False  # ready for next event
-
+                        alert_active = False
+                        distraction_start_time = None
+                        logged_this_event = False
                 else:
                     cv2.putText(frame, "Pose solvePnP failed", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
 
@@ -142,6 +146,7 @@ try:
                 cv2.putText(frame, "Pose error", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
         else:
             alert_active = False
+            distraction_start_time = None
             logged_this_event = False
             cv2.putText(frame, "No face detected", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
