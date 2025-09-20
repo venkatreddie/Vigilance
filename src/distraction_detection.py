@@ -64,9 +64,9 @@ MODEL_POINTS = np.array([
 LMKS_IDX = [1, 199, 33, 263, 61, 291]
 
 alert_active = False
-logged_this_event = False
 last_beep_time = 0.0
 distraction_start_time = None
+distraction_logged = False  # to prevent duplicate logs per event
 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
@@ -121,33 +121,37 @@ try:
                     if is_distracted:
                         if distraction_start_time is None:
                             distraction_start_time = now
+                            distraction_logged = False  # reset logging
                         elif (now - distraction_start_time) >= DISTRACTION_DURATION:
                             if not alert_active:
                                 alert_active = True
                                 beep()
-                                if not logged_this_event:
+                                if not distraction_logged:
                                     with open(LOG_FILE, "a", newline="") as f:
                                         writer = csv.writer(f)
                                         writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                         round(yaw_deg,2), round(pitch_deg,2), "Distraction Detected"])
-                                    logged_this_event = True
+                                                         round(yaw_deg,2), round(pitch_deg,2), "Distraction Started"])
+                                    distraction_logged = True
                                 last_beep_time = now
                             elif (now - last_beep_time) >= ALERT_REPEAT_INTERVAL:
                                 beep()
                                 last_beep_time = now
                     elif is_straight:
+                        if alert_active and distraction_logged:
+                            with open(LOG_FILE, "a", newline="") as f:
+                                writer = csv.writer(f)
+                                writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
+                                                 round(yaw_deg,2), round(pitch_deg,2), "Distraction Ended"])
                         alert_active = False
                         distraction_start_time = None
-                        logged_this_event = False
-                else:
-                    cv2.putText(frame, "Pose solvePnP failed", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+                        distraction_logged = False
 
             except Exception:
                 cv2.putText(frame, "Pose error", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
         else:
             alert_active = False
             distraction_start_time = None
-            logged_this_event = False
+            distraction_logged = False
             cv2.putText(frame, "No face detected", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
         # Draw warning only when alert is active
