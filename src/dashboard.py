@@ -5,6 +5,7 @@ import time
 import csv
 import os
 import winsound
+import matplotlib.pyplot as plt
 
 # Mediapipe face mesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -54,6 +55,23 @@ def get_head_pose(landmarks, frame_w, frame_h):
     yaw, pitch, roll = [angle[0] for angle in eulerAngles]
     return yaw, pitch
 
+# Function to draw matplotlib graph and return as OpenCV image
+def draw_graph(values, width=400, height=200):
+    plt.figure(figsize=(4,2))
+    plt.plot(values, color="red", linewidth=2)
+    plt.ylim(0, 100)
+    plt.title("Distraction Probability", fontsize=10)
+    plt.xlabel("Frames")
+    plt.ylabel("%")
+    plt.tight_layout()
+
+    # Convert plot to image
+    plt.savefig("graph.png")
+    plt.close()
+    graph_img = cv2.imread("graph.png")
+    graph_img = cv2.resize(graph_img, (width, height))
+    return graph_img
+
 # State variables
 distraction_start_time = None
 distraction_active = False
@@ -61,6 +79,8 @@ total_distractions = 0
 total_distraction_time = 0
 longest_distraction = 0
 probability = 0
+
+prob_values = []  # For graph
 
 cap = cv2.VideoCapture(0)
 
@@ -86,8 +106,10 @@ while True:
                     distraction_start_time = current_time
                 elapsed = current_time - distraction_start_time
 
-                # Probability (0 → 100%)
                 probability = min(100, int((elapsed / 15) * 100))
+                prob_values.append(probability)
+                if len(prob_values) > 50:
+                    prob_values.pop(0)
 
                 if not distraction_active and elapsed >= 10:
                     distraction_active = True
@@ -99,7 +121,6 @@ while True:
                         writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), "Distraction Start", yaw, pitch, ""])
 
                 if distraction_active:
-                    # Draw alert board
                     cv2.rectangle(frame, (80, 40), (560, 120), (0, 0, 255), -1)
                     cv2.putText(frame, "DISTRACTION DETECTED!", (100, 100),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
@@ -117,6 +138,9 @@ while True:
 
                 distraction_start_time = None
                 probability = 0
+                prob_values.append(probability)
+                if len(prob_values) > 50:
+                    prob_values.pop(0)
 
             # Show yaw/pitch
             cv2.putText(frame, f"Yaw: {yaw:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
@@ -131,6 +155,11 @@ while True:
     cv2.putText(frame, f"Total Distractions: {total_distractions}", (400, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
     cv2.putText(frame, f"Total Time: {int(total_distraction_time)}s", (400, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
     cv2.putText(frame, f"Longest: {int(longest_distraction)}s", (400, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+
+    # Add graph overlay
+    graph_img = draw_graph(prob_values)
+    gh, gw, _ = graph_img.shape
+    frame[10:10+gh, w-gw-10:w-10] = graph_img
 
     # Show window
     cv2.imshow("Driver Vigilance - Dashboard", frame)
