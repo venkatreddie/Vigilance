@@ -1,355 +1,192 @@
-# dashboard.py
-import cv2
-import mediapipe as mp
-import numpy as np
-import time
-import csv
+# dashboard.py  -- Streamlit dashboard that DOES NOT require mediapipe
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
 import os
-import winsound
-import math
-from collections import deque
-import matplotlib
-matplotlib.use("Agg")
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from datetime import datetime
 
-# -------- CONFIG --------
-LOG_FILE = "distraction_log.csv"
+st.set_page_config(page_title="Driver Vigilance Analytics", layout="wide")
+st.title("🚗 Driver Vigilance Analytics (CSV-only)")
 
-# thresholds (degrees) relative to calibrated neutral pose
-ENTER_YAW_DEG = 20.0       # enter distraction if abs(delta_yaw) > this
-ENTER_PITCH_DEG = 15.0     # enter distraction if delta_pitch > this (looking down)
-
-EXIT_YAW_DEG = 12.0        # consider straight if abs(delta_yaw) <= this
-EXIT_PITCH_DEG = 8.0       # consider straight if delta_pitch <= this
-
-DISTRACTION_DURATION = 10.0    # seconds continuous before alert
-ALERT_REPEAT_INTERVAL = 2.0    # beep every N seconds while alert active
-
-BEEP_FREQ = 2000      # Hz
-BEEP_DUR_MS = 200     # ms
-
-GRAPH_LEN = 50        # samples in plot
-SMOOTH_WINDOW = 5     # moving average window for angles
-
-CALIBRATE_SECONDS = 2.0  # seconds to auto-calibrate neutral pose at start
-
-# -------- SETUP --------
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True,
-                                  min_detection_confidence=0.5,
-                                  min_tracking_confidence=0.5)
-
-if not os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Timestamp", "Event", "Yaw_deg", "Pitch_deg", "Duration_s"])
-
-# Model / landmark indices for solvePnP (same used previously)
-MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),          # nose tip
-    (0.0, -330.0, -65.0),     # chin
-    (-225.0, 170.0, -135.0),  # left eye corner
-    (225.0, 170.0, -135.0),   # right eye corner
-    (-150.0, -150.0, -125.0), # left mouth
-    (150.0, -150.0, -125.0)   # right mouth
-], dtype=np.float64)
-
-LMKS_IDX = [1, 199, 33, 263, 61, 291]  # indexes used from MediaPipe FaceMesh
-
-# smoothing buffers
-yaw_buf = deque(maxlen=SMOOTH_WINDOW)
-pitch_buf = deque(maxlen=SMOOTH_WINDOW)
-
-# logging / detection state
-distraction_start_time = None
-alert_active = False
-logged_started = False
-last_beep_time = 0.0
-
-# baseline (neutral) values (set after calibration)
-base_yaw = 0.0
-base_pitch = 0.0
-calibrated = False
-
-# Probability history (for graph)
-prob_history = deque(maxlen=GRAPH_LEN)
-
-# helpers -------------------------------------------------------------------
-def rotationMatrixToEulerAngles(R):
-    sy = math.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
-    singular = sy < 1e-6
-    if not singular:
-        x = math.atan2(R[2,1], R[2,2])   # roll
-        y = math.atan2(-R[2,0], sy)      # pitch
-        z = math.atan2(R[1,0], R[0,0])   # yaw
-    else:
-        x = math.atan2(-R[1,2], R[1,1])
-        y = math.atan2(-R[2,0], sy)
-        z = 0
-    return np.degrees([x, y, z])  # roll, pitch, yaw
-
-def wrap_angle_deg(a):
-    """Normalize angle to [-180, 180]"""
-    a = (a + 180.0) % 360.0 - 180.0
-    return a
-
-def beep():
+# Sidebar controls
+st.sidebar.header("Controls")
+upload = st.sidebar.file_uploader("Upload a log CSV (optional)", type=["csv"])
+use_autorefresh = st.sidebar.checkbox("Auto refresh (requires streamlit-autorefresh)", value=False)
+if use_autorefresh:
     try:
-        winsound.Beep(BEEP_FREQ, BEEP_DUR_MS)
+        from streamlit_autorefresh import st_autorefresh
+        # refresh every 5 seconds (5000 ms)
+        st_autorefresh(interval=5_000, key="autorefresh")
     except Exception:
-        pass
+        st.sidebar.error("Install `streamlit-autorefresh` to enable auto refresh: pip install streamlit-autorefresh")
 
-def draw_probability_graph(values, width=360, height=200):
-    """Render matplotlib plot to an OpenCV BGR image (in-memory)."""
-    fig = Figure(figsize=(width/100.0, height/100.0), dpi=100)
-    ax = fig.add_subplot(111)
-    ax.plot(list(values), color="red", linewidth=2)
-    ax.set_ylim(0, 100)
-    ax.set_xlim(0, GRAPH_LEN-1)
-    ax.set_title("Distraction Probability")
-    ax.set_ylabel("%")
-    ax.set_xlabel("Samples")
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    canvas = FigureCanvas(fig)
-    canvas.draw()
-    buf = canvas.buffer_rgba()
-    img = np.asarray(buf)
-    # RGBA -> BGR
-    img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-    return img
+# search common filenames
+CANDIDATES = [
+    "distraction_log.csv",
+    "data/distraction_log.csv",
+    "log.csv",
+    "fatigue_log.csv",
+    "data/fatigue_log.csv",
+    "distraction_log.csv"
+]
 
-# camera
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    raise RuntimeError("Cannot open camera")
+found_path = None
+for p in CANDIDATES:
+    if os.path.exists(p):
+        found_path = p
+        break
 
-# calibration routine
-def calibrate_neutral(seconds=CALIBRATE_SECONDS):
-    """Capture neutral yaw/pitch for the given seconds and return median values."""
-    print(f"[calib] Hold still for {seconds:.1f}s to set neutral pose...")
-    samples_y = []
-    samples_p = []
-    t0 = time.time()
-    while time.time() - t0 < seconds:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        h, w = frame.shape[:2]
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb)
-        if results.multi_face_landmarks:
-            lm = results.multi_face_landmarks[0].landmark
-            try:
-                image_points = np.array([
-                    (lm[LMKS_IDX[0]].x * w, lm[LMKS_IDX[0]].y * h),
-                    (lm[LMKS_IDX[1]].x * w, lm[LMKS_IDX[1]].y * h),
-                    (lm[LMKS_IDX[2]].x * w, lm[LMKS_IDX[2]].y * h),
-                    (lm[LMKS_IDX[3]].x * w, lm[LMKS_IDX[3]].y * h),
-                    (lm[LMKS_IDX[4]].x * w, lm[LMKS_IDX[4]].y * h),
-                    (lm[LMKS_IDX[5]].x * w, lm[LMKS_IDX[5]].y * h)
-                ], dtype=np.float64)
+if upload is not None:
+    try:
+        df = pd.read_csv(upload, encoding="utf-8", errors="replace")
+        st.success("Loaded uploaded CSV")
+    except Exception as e:
+        st.error(f"Failed to read uploaded CSV: {e}")
+        st.stop()
+elif found_path:
+    try:
+        df = pd.read_csv(found_path, encoding="utf-8", errors="replace")
+        st.success(f"Loaded log file: {found_path}")
+    except Exception as e:
+        st.error(f"Failed to read {found_path}: {e}")
+        st.stop()
+else:
+    st.error(
+        "No log file found. Place one of these files in the folder or upload one:\n\n"
+        "- distraction_log.csv\n- data/distraction_log.csv\n- log.csv\n- fatigue_log.csv\n\n"
+        "Or run your detection script to produce the CSV, then refresh this page."
+    )
+    st.stop()
 
-                focal_length = w
-                center = (w/2.0, h/2.0)
-                camera_matrix = np.array([[focal_length, 0, center[0]],
-                                          [0, focal_length, center[1]],
-                                          [0, 0, 1]], dtype=np.float64)
-                dist_coeffs = np.zeros((4,1))
-                success, rotation_vector, translation_vector = cv2.solvePnP(
-                    MODEL_POINTS, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-                )
-                if success:
-                    R_mat, _ = cv2.Rodrigues(rotation_vector)
-                    _, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R_mat)
-                    # normalize yaw to [-180,180]
-                    yaw_deg = wrap_angle_deg(yaw_deg)
-                    samples_y.append(yaw_deg)
-                    samples_p.append(pitch_deg)
-            except Exception:
-                pass
-        # show small message while calibrating
-        cv2.putText(frame, f"Calibrating... {seconds - (time.time()-t0):.1f}s", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-        cv2.imshow("Distraction Dashboard - Calibrating", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    # fallback if no samples
-    if len(samples_y) == 0:
-        return 0.0, 0.0
-    return float(np.median(samples_y)), float(np.median(samples_p))
+# normalize column names (case-insensitive)
+cols_lower = {c.lower(): c for c in df.columns}
 
-# initial calibration
-base_yaw, base_pitch = calibrate_neutral(CALIBRATE_SECONDS)
-calibrated = True
-print(f"[calib] Done. base_yaw={base_yaw:.2f}, base_pitch={base_pitch:.2f}")
-# ensure some initial graph values
-for _ in range(GRAPH_LEN//2):
-    prob_history.append(0)
+def find_col(*options):
+    for opt in options:
+        if opt.lower() in cols_lower:
+            return cols_lower[opt.lower()]
+    return None
 
-# -------- main loop --------
-try:
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        h, w = frame.shape[:2]
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb)
+# possible column name variants
+ts_col = find_col("Timestamp", "timestamp", "time", "Time")
+yaw_col = find_col("Yaw", "Yaw_deg", "yaw", "yaw_deg")
+pitch_col = find_col("Pitch", "Pitch_deg", "pitch", "pitch_deg")
+mar_col = find_col("MAR", "mar")
+event_col = find_col("Event", "event", "DistractionType", "Type")
 
-        yaw_deg = 0.0
-        pitch_deg = 0.0
-        face_present = False
+# parse timestamp if exists
+if ts_col:
+    try:
+        df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+    except Exception:
+        df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
 
-        if results.multi_face_landmarks:
-            face_present = True
-            lm = results.multi_face_landmarks[0].landmark
-            try:
-                image_points = np.array([
-                    (lm[LMKS_IDX[0]].x * w, lm[LMKS_IDX[0]].y * h),
-                    (lm[LMKS_IDX[1]].x * w, lm[LMKS_IDX[1]].y * h),
-                    (lm[LMKS_IDX[2]].x * w, lm[LMKS_IDX[2]].y * h),
-                    (lm[LMKS_IDX[3]].x * w, lm[LMKS_IDX[3]].y * h),
-                    (lm[LMKS_IDX[4]].x * w, lm[LMKS_IDX[4]].y * h),
-                    (lm[LMKS_IDX[5]].x * w, lm[LMKS_IDX[5]].y * h)
-                ], dtype=np.float64)
+# create standard columns for plotting if available
+df_plot = df.copy()
+df_plot["Timestamp"] = df_plot[ts_col] if ts_col in df_plot.columns else pd.NaT
+if yaw_col:
+    df_plot["Yaw"] = pd.to_numeric(df_plot[yaw_col], errors="coerce")
+else:
+    df_plot["Yaw"] = pd.NA
+if pitch_col:
+    df_plot["Pitch"] = pd.to_numeric(df_plot[pitch_col], errors="coerce")
+else:
+    df_plot["Pitch"] = pd.NA
+if mar_col:
+    df_plot["MAR"] = pd.to_numeric(df_plot[mar_col], errors="coerce")
+else:
+    df_plot["MAR"] = pd.NA
+if event_col:
+    df_plot["Event"] = df_plot[event_col]
+else:
+    # try to infer from other columns or set default
+    df_plot["Event"] = df_plot.get("Event", df_plot.get("DistractionType", ""))
 
-                focal_length = w
-                center = (w/2.0, h/2.0)
-                camera_matrix = np.array([[focal_length, 0, center[0]],
-                                          [0, focal_length, center[1]],
-                                          [0, 0, 1]], dtype=np.float64)
-                dist_coeffs = np.zeros((4,1))
+# Metrics
+st.subheader("Summary Metrics")
+col1, col2, col3, col4 = st.columns(4)
 
-                success, rotation_vector, translation_vector = cv2.solvePnP(
-                    MODEL_POINTS, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-                )
-                if success:
-                    R_mat, _ = cv2.Rodrigues(rotation_vector)
-                    roll_deg, pitch_deg_raw, yaw_deg_raw = rotationMatrixToEulerAngles(R_mat)
-                    # normalize yaw and compute delta relative to baseline
-                    yaw_deg_raw = wrap_angle_deg(yaw_deg_raw)
-                    # compute deltas relative to baseline
-                    delta_yaw = wrap_angle_deg(yaw_deg_raw - base_yaw)
-                    delta_pitch = pitch_deg_raw - base_pitch
+total_events = len(df_plot)
+avg_yaw = df_plot["Yaw"].dropna().mean() if df_plot["Yaw"].notna().any() else float("nan")
+avg_pitch = df_plot["Pitch"].dropna().mean() if df_plot["Pitch"].notna().any() else float("nan")
+avg_mar = df_plot["MAR"].dropna().mean() if df_plot["MAR"].notna().any() else float("nan")
 
-                    # smoothing (short window)
-                    yaw_buf.append(delta_yaw)
-                    pitch_buf.append(delta_pitch)
-                    smooth_yaw = float(np.mean(yaw_buf))
-                    smooth_pitch = float(np.mean(pitch_buf))
+col1.metric("Total events", total_events)
+col2.metric("Avg Yaw", f"{avg_yaw:.2f}" if not pd.isna(avg_yaw) else "N/A")
+col3.metric("Avg Pitch", f"{avg_pitch:.2f}" if not pd.isna(avg_pitch) else "N/A")
+col4.metric("Avg MAR", f"{avg_mar:.2f}" if not pd.isna(avg_mar) else "N/A")
 
-                    # compute distraction/states using smoothed deltas
-                    now = time.time()
-                    is_distracted = (abs(smooth_yaw) > ENTER_YAW_DEG) or (smooth_pitch > ENTER_PITCH_DEG)
-                    is_straight = (abs(smooth_yaw) <= EXIT_YAW_DEG) and (abs(smooth_pitch) <= EXIT_PITCH_DEG)
+# Charts area
+st.subheader("Yaw / Pitch / MAR over time")
+fig, ax = plt.subplots(figsize=(12, 4))
+has_plotted = False
+if df_plot["Timestamp"].notna().any():
+    if df_plot["Yaw"].notna().any():
+        ax.plot(df_plot["Timestamp"], df_plot["Yaw"], label="Yaw", color="orange")
+        has_plotted = True
+    if df_plot["Pitch"].notna().any():
+        ax.plot(df_plot["Timestamp"], df_plot["Pitch"], label="Pitch", color="blue")
+        has_plotted = True
+    if df_plot["MAR"].notna().any():
+        ax.plot(df_plot["Timestamp"], df_plot["MAR"], label="MAR", color="green")
+        has_plotted = True
+    ax.set_xlabel("Time")
+else:
+    # fallback to index
+    if df_plot["Yaw"].notna().any():
+        ax.plot(df_plot.index, df_plot["Yaw"], label="Yaw", color="orange")
+        has_plotted = True
+    if df_plot["Pitch"].notna().any():
+        ax.plot(df_plot.index, df_plot["Pitch"], label="Pitch", color="blue")
+        has_plotted = True
+    if df_plot["MAR"].notna().any():
+        ax.plot(df_plot.index, df_plot["MAR"], label="MAR", color="green")
+        has_plotted = True
+    ax.set_xlabel("Record #")
 
-                    # manage timers & logging
-                    if is_distracted:
-                        if distraction_start_time is None:
-                            distraction_start_time = now
-                        elapsed = now - distraction_start_time
-                        # compute simple probability from elapsed (0..DISTRACTION_DURATION*1.5 => 0..100)
-                        prob = int(min(100.0, (elapsed / (DISTRACTION_DURATION * 1.5)) * 100.0))
-                        prob_history.append(prob)
-                        # activate alert only after hold duration
-                        if elapsed >= DISTRACTION_DURATION:
-                            if not alert_active:
-                                alert_active = True
-                                # immediate beep and log "started"
-                                beep()
-                                with open(LOG_FILE, "a", newline="") as f:
-                                    writer = csv.writer(f)
-                                    writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                     "Distraction Started", round(smooth_yaw,2), round(smooth_pitch,2), ""])
-                                logged_started = True
-                                last_beep_time = now
-                            else:
-                                # repeat beep every ALERT_REPEAT_INTERVAL
-                                if (now - last_beep_time) >= ALERT_REPEAT_INTERVAL:
-                                    beep()
-                                    last_beep_time = now
-                    else:
-                        # not currently distracted: reset timer and probability
-                        prob_history.append(0)
-                        distraction_start_time = None
-                        # if alert was active and now straight, end event and log end immediately
-                        if alert_active and is_straight:
-                            # log end and duration
-                            with open(LOG_FILE, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                 "Distraction Ended", round(smooth_yaw,2), round(smooth_pitch,2),
-                                                 round((time.time() - last_beep_time), 1)])
-                            # clear
-                            alert_active = False
-                            logged_started = False
-                            last_beep_time = 0.0
+if has_plotted:
+    ax.set_ylabel("Value")
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
+else:
+    st.info("No Yaw/Pitch/MAR numeric columns found to plot.")
 
-                    # draw debug yaw/pitch (show deltas)
-                    cv2.putText(frame, f"YawΔ: {smooth_yaw:+6.2f}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-                    cv2.putText(frame, f"PitchΔ: {smooth_pitch:+6.2f}", (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+# Frequency over time (per minute)
+st.subheader("Events per minute")
+if "Timestamp" in df_plot.columns and df_plot["Timestamp"].notna().any():
+    df_counts = df_plot.set_index("Timestamp").resample("T").size()
+    fig2, ax2 = plt.subplots(figsize=(12, 3))
+    ax2.bar(df_counts.index, df_counts.values, width=0.01, color="red")
+    ax2.set_xlabel("Minute")
+    ax2.set_ylabel("Event count")
+    st.pyplot(fig2)
+else:
+    st.info("No timestamp column to compute per-minute counts.")
 
-                else:
-                    # solvePnP failed
-                    prob_history.append(0)
-            except Exception:
-                prob_history.append(0)
-        else:
-            # no face
-            prob_history.append(0)
-            distraction_start_time = None
-            alert_active = False
-            logged_started = False
-            yaw_buf.clear()
-            pitch_buf.clear()
-            cv2.putText(frame, "No face detected", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+# Recent events table
+st.subheader("Recent Events")
+if "Timestamp" in df_plot.columns:
+    df_recent = df_plot.sort_values("Timestamp", ascending=False).head(50)
+else:
+    df_recent = df_plot.tail(50)
+st.dataframe(df_recent.reset_index(drop=True))
 
-        # Draw signboard if alert active
-        if alert_active:
-            cv2.rectangle(frame, (60, 40), (w-60, 130), (0, 0, 255), -1)
-            cv2.putText(frame, "⚠ DISTRACTION DETECTED ⚠", (80, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 3)
+# Event breakdown (counts by Event column)
+st.subheader("Event Types")
+if "Event" in df_plot.columns and df_plot["Event"].notna().any():
+    types = df_plot["Event"].value_counts()
+    fig3, ax3 = plt.subplots(figsize=(6, 3))
+    ax3.pie(types.values, labels=types.index, autopct="%1.0f%%")
+    ax3.axis("equal")
+    st.pyplot(fig3)
+else:
+    st.info("No 'Event' column found in CSV (or it's empty).")
 
-        # Draw probability bar (use last prob)
-        poll = prob_history[-1] if len(prob_history) else 0
-        bar_w = 220
-        cv2.rectangle(frame, (12, h-36), (12+bar_w, h-12), (200,200,200), 2)
-        fill_w = int((poll/100.0)*bar_w)
-        cv2.rectangle(frame, (14, h-34), (14+fill_w, h-14), (0,0,255), -1)
-        cv2.putText(frame, f"{poll}%", (14+bar_w+10, h-18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+# Manual refresh button (Streamlit reruns script on widget interaction)
+if st.button("Refresh"):
+    st.experimental_rerun()
 
-        # Stats summary (scan log to produce quick stats if needed or keep counters)
-        # For simplicity we won't rescan logs here; just show basic indicators.
-        cv2.putText(frame, f"Alert: {'ON' if alert_active else 'OFF'}", (w-320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                    (0,255,0) if not alert_active else (0,0,255), 2)
-
-        # Draw graph overlay in top-right
-        graph_img = draw_probability_graph(prob_history, width=360, height=200)
-        gh, gw = graph_img.shape[:2]
-        y0 = 10
-        x0 = w - gw - 10
-        # ensure overlay fits
-        if x0 > 0 and y0 + gh < h:
-            frame[y0:y0+gh, x0:x0+gw] = graph_img
-
-        # small UI help
-        cv2.putText(frame, "Press 'c' to recalibrate neutral pose, 'q' to quit", (10, h-8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
-
-        cv2.imshow("Driver Vigilance - Dashboard", frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q') or key == 27:
-            break
-        if key == ord('c'):  # manual recalibration
-            base_yaw, base_pitch = calibrate_neutral(CALIBRATE_SECONDS)
-            print(f"[calib] Recalibrated base_yaw={base_yaw:.2f}, base_pitch={base_pitch:.2f}")
-            yaw_buf.clear()
-            pitch_buf.clear()
-            prob_history.clear()
-            for _ in range(GRAPH_LEN//2):
-                prob_history.append(0)
-
-finally:
-    cap.release()
-    cv2.destroyAllWindows()
-    face_mesh.close()
+st.markdown("---")
+st.caption("If you want the dashboard to reflect live camera detections, run the detection script to write the CSV (then press Refresh). "
+           "To enable camera-based detection (which requires mediapipe), install mediapipe: `pip install mediapipe`.")
