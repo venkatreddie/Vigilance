@@ -10,7 +10,7 @@ LOG_FILE = "distraction_log.csv"
 # Streamlit page settings
 st.set_page_config(page_title="Driver Vigilance Analytics", layout="wide")
 
-st.title("🚗 Driver Vigilance Analytics Dashboard")
+st.title("🚗 Driver Vigilance  Dashboard")
 st.markdown("Monitor driver distraction trends and performance in real-time.")
 
 # Check if log file exists
