@@ -1,71 +1,100 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import os
-import subprocess
+import time
+import sqlite3
+import altair as alt
 
-st.set_page_config(page_title="Driver Vigilance Dashboard", layout="wide")
+# -----------------------------
+# DATABASE SETUP
+# -----------------------------
+DB_PATH = "vigilance_data.db"
 
-st.title("🚗 Driver Vigilance Analytics (Live Mode)")
-st.markdown("Monitor driver distraction trends and performance in real-time.")
-
-# CSV log file (auto-created by dash.py)
-log_file = "detection_log.csv"
-
-# ---- File Upload (Optional for testing) ----
-uploaded_file = st.sidebar.file_uploader("Upload a log CSV (optional)", type=["csv"])
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-elif os.path.exists(log_file):
-    df = pd.read_csv(log_file)
-else:
-    df = pd.DataFrame()
-
-# ---- Data Validation ----
-required_cols = ["timestamp", "status"]
-if df.empty:
-    st.warning("No data found yet. Please start live detection.")
-elif not all(col in df.columns for col in required_cols):
-    st.error(f"CSV must contain columns: {required_cols}")
-else:
-    st.success("✅ Data loaded successfully!")
-
-    # ---- Metrics ----
-    total_frames = len(df)
-    drowsy_count = df["status"].str.contains("Drowsy", case=False).sum()
-    yawn_count = df["yawning"].sum() if "yawning" in df.columns else 0
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Records", total_frames)
-    col2.metric("Drowsy Events", drowsy_count)
-    col3.metric("Yawns Detected", yawn_count)
-
-    st.divider()
-
-    # ---- Plots ----
-    if "timestamp" in df.columns and "status" in df.columns:
-        fig1 = px.scatter(
-            df, x="timestamp", y="status", color="status",
-            title="Driver Vigilance Status Over Time"
-        )
-        st.plotly_chart(fig1, use_container_width=True)
-
-    if "accident_probability" in df.columns:
-        fig2 = px.histogram(df, x="accident_probability", nbins=10, title="Accident Probability Distribution")
-        st.plotly_chart(fig2, use_container_width=True)
-
-# ---- Control Panel ----
-st.sidebar.markdown("## Controls")
-if st.sidebar.button("▶ Start Live Detection"):
+def get_data():
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT timestamp, event_type, confidence, status 
+        FROM detection_logs 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+    """
     try:
-        subprocess.Popen(["python", "dash.py"])
-        st.sidebar.success("Live detection started successfully!")
+        df = pd.read_sql_query(query, conn)
     except Exception as e:
-        st.sidebar.error(f"Failed to start detection: {e}")
+        st.error(f"Error reading database: {e}")
+        df = pd.DataFrame(columns=["timestamp", "event_type", "confidence", "status"])
+    conn.close()
+    return df
 
-auto_refresh = st.sidebar.checkbox("Auto refresh every 5 seconds")
-if auto_refresh:
-    st.experimental_rerun()
 
-st.markdown("---")
-st.caption("Developed by Venkat • Driver Vigilance Monitoring System © 2025")
+# -----------------------------
+# STREAMLIT PAGE CONFIG
+# -----------------------------
+st.set_page_config(
+    page_title="Driver Vigilance Dashboard",
+    page_icon="🚗",
+    layout="wide"
+)
+
+st.title("🚘 Driver Vigilance Monitoring Dashboard")
+st.caption("Real-time Monitoring and Analytics for Drowsiness, Yawning & Distraction Detection")
+
+# -----------------------------
+# SIDEBAR CONTROLS
+# -----------------------------
+st.sidebar.header("⚙️ Controls")
+
+refresh_rate = st.sidebar.slider("Auto Refresh (seconds)", 2, 30, 5)
+show_raw = st.sidebar.checkbox("Show Raw Data", False)
+show_chart = st.sidebar.checkbox("Show Charts", True)
+
+# -----------------------------
+# DASHBOARD DATA DISPLAY
+# -----------------------------
+placeholder = st.empty()
+
+while True:
+    with placeholder.container():
+        df = get_data()
+
+        col1, col2, col3 = st.columns(3)
+        total_drowsy = df[df["event_type"] == "drowsy"].shape[0]
+        total_yawn = df[df["event_type"] == "yawn"].shape[0]
+        total_alert = df.shape[0]
+
+        col1.metric("😴 Drowsiness Detected", total_drowsy)
+        col2.metric("😮 Yawning Detected", total_yawn)
+        col3.metric("📊 Total Alerts Logged", total_alert)
+
+        # System Status
+        st.markdown("### 🧠 System Status")
+        if not df.empty:
+            latest_status = df.iloc[0]["status"]
+            status_color = "green" if latest_status == "Active" else "red"
+            st.markdown(f"**Status:** <span style='color:{status_color}'>{latest_status}</span>", unsafe_allow_html=True)
+        else:
+            st.warning("No recent data found. Waiting for detection input...")
+
+        # Charts
+        if show_chart and not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            chart = (
+                alt.Chart(df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("timestamp:T", title="Time"),
+                    y=alt.Y("count()", title="Event Count"),
+                    color="event_type:N"
+                )
+                .properties(width="container", height=350, title="Event Frequency Over Time")
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+        # Raw Data
+        if show_raw:
+            st.markdown("### 📋 Recent Detection Logs")
+            st.dataframe(df, use_container_width=True, height=300)
+
+        st.markdown("---")
+        st.markdown("© 2025 Driver Vigilance | Developed by Venkat")
+
+    time.sleep(refresh_rate)
