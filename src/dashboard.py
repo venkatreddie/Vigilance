@@ -1,192 +1,71 @@
-# dashboard.py  -- Streamlit dashboard that DOES NOT require mediapipe
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.express as px
 import os
-from datetime import datetime
+import subprocess
 
-st.set_page_config(page_title="Driver Vigilance Analytics", layout="wide")
-st.title("🚗 Driver Vigilance Analytics (CSV-only)")
+st.set_page_config(page_title="Driver Vigilance Dashboard", layout="wide")
 
-# Sidebar controls
-st.sidebar.header("Controls")
-upload = st.sidebar.file_uploader("Upload a log CSV (optional)", type=["csv"])
-use_autorefresh = st.sidebar.checkbox("Auto refresh (requires streamlit-autorefresh)", value=False)
-if use_autorefresh:
+st.title("🚗 Driver Vigilance Analytics (Live Mode)")
+st.markdown("Monitor driver distraction trends and performance in real-time.")
+
+# CSV log file (auto-created by dash.py)
+log_file = "detection_log.csv"
+
+# ---- File Upload (Optional for testing) ----
+uploaded_file = st.sidebar.file_uploader("Upload a log CSV (optional)", type=["csv"])
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+elif os.path.exists(log_file):
+    df = pd.read_csv(log_file)
+else:
+    df = pd.DataFrame()
+
+# ---- Data Validation ----
+required_cols = ["timestamp", "status"]
+if df.empty:
+    st.warning("No data found yet. Please start live detection.")
+elif not all(col in df.columns for col in required_cols):
+    st.error(f"CSV must contain columns: {required_cols}")
+else:
+    st.success("✅ Data loaded successfully!")
+
+    # ---- Metrics ----
+    total_frames = len(df)
+    drowsy_count = df["status"].str.contains("Drowsy", case=False).sum()
+    yawn_count = df["yawning"].sum() if "yawning" in df.columns else 0
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Records", total_frames)
+    col2.metric("Drowsy Events", drowsy_count)
+    col3.metric("Yawns Detected", yawn_count)
+
+    st.divider()
+
+    # ---- Plots ----
+    if "timestamp" in df.columns and "status" in df.columns:
+        fig1 = px.scatter(
+            df, x="timestamp", y="status", color="status",
+            title="Driver Vigilance Status Over Time"
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+    if "accident_probability" in df.columns:
+        fig2 = px.histogram(df, x="accident_probability", nbins=10, title="Accident Probability Distribution")
+        st.plotly_chart(fig2, use_container_width=True)
+
+# ---- Control Panel ----
+st.sidebar.markdown("## Controls")
+if st.sidebar.button("▶ Start Live Detection"):
     try:
-        from streamlit_autorefresh import st_autorefresh
-        # refresh every 5 seconds (5000 ms)
-        st_autorefresh(interval=5_000, key="autorefresh")
-    except Exception:
-        st.sidebar.error("Install `streamlit-autorefresh` to enable auto refresh: pip install streamlit-autorefresh")
-
-# search common filenames
-CANDIDATES = [
-    "distraction_log.csv",
-    "data/distraction_log.csv",
-    "log.csv",
-    "fatigue_log.csv",
-    "data/fatigue_log.csv",
-    "distraction_log.csv"
-]
-
-found_path = None
-for p in CANDIDATES:
-    if os.path.exists(p):
-        found_path = p
-        break
-
-if upload is not None:
-    try:
-        df = pd.read_csv(upload, encoding="utf-8", errors="replace")
-        st.success("Loaded uploaded CSV")
+        subprocess.Popen(["python", "dash.py"])
+        st.sidebar.success("Live detection started successfully!")
     except Exception as e:
-        st.error(f"Failed to read uploaded CSV: {e}")
-        st.stop()
-elif found_path:
-    try:
-        df = pd.read_csv(found_path, encoding="utf-8", errors="replace")
-        st.success(f"Loaded log file: {found_path}")
-    except Exception as e:
-        st.error(f"Failed to read {found_path}: {e}")
-        st.stop()
-else:
-    st.error(
-        "No log file found. Place one of these files in the folder or upload one:\n\n"
-        "- distraction_log.csv\n- data/distraction_log.csv\n- log.csv\n- fatigue_log.csv\n\n"
-        "Or run your detection script to produce the CSV, then refresh this page."
-    )
-    st.stop()
+        st.sidebar.error(f"Failed to start detection: {e}")
 
-# normalize column names (case-insensitive)
-cols_lower = {c.lower(): c for c in df.columns}
-
-def find_col(*options):
-    for opt in options:
-        if opt.lower() in cols_lower:
-            return cols_lower[opt.lower()]
-    return None
-
-# possible column name variants
-ts_col = find_col("Timestamp", "timestamp", "time", "Time")
-yaw_col = find_col("Yaw", "Yaw_deg", "yaw", "yaw_deg")
-pitch_col = find_col("Pitch", "Pitch_deg", "pitch", "pitch_deg")
-mar_col = find_col("MAR", "mar")
-event_col = find_col("Event", "event", "DistractionType", "Type")
-
-# parse timestamp if exists
-if ts_col:
-    try:
-        df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
-    except Exception:
-        df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
-
-# create standard columns for plotting if available
-df_plot = df.copy()
-df_plot["Timestamp"] = df_plot[ts_col] if ts_col in df_plot.columns else pd.NaT
-if yaw_col:
-    df_plot["Yaw"] = pd.to_numeric(df_plot[yaw_col], errors="coerce")
-else:
-    df_plot["Yaw"] = pd.NA
-if pitch_col:
-    df_plot["Pitch"] = pd.to_numeric(df_plot[pitch_col], errors="coerce")
-else:
-    df_plot["Pitch"] = pd.NA
-if mar_col:
-    df_plot["MAR"] = pd.to_numeric(df_plot[mar_col], errors="coerce")
-else:
-    df_plot["MAR"] = pd.NA
-if event_col:
-    df_plot["Event"] = df_plot[event_col]
-else:
-    # try to infer from other columns or set default
-    df_plot["Event"] = df_plot.get("Event", df_plot.get("DistractionType", ""))
-
-# Metrics
-st.subheader("Summary Metrics")
-col1, col2, col3, col4 = st.columns(4)
-
-total_events = len(df_plot)
-avg_yaw = df_plot["Yaw"].dropna().mean() if df_plot["Yaw"].notna().any() else float("nan")
-avg_pitch = df_plot["Pitch"].dropna().mean() if df_plot["Pitch"].notna().any() else float("nan")
-avg_mar = df_plot["MAR"].dropna().mean() if df_plot["MAR"].notna().any() else float("nan")
-
-col1.metric("Total events", total_events)
-col2.metric("Avg Yaw", f"{avg_yaw:.2f}" if not pd.isna(avg_yaw) else "N/A")
-col3.metric("Avg Pitch", f"{avg_pitch:.2f}" if not pd.isna(avg_pitch) else "N/A")
-col4.metric("Avg MAR", f"{avg_mar:.2f}" if not pd.isna(avg_mar) else "N/A")
-
-# Charts area
-st.subheader("Yaw / Pitch / MAR over time")
-fig, ax = plt.subplots(figsize=(12, 4))
-has_plotted = False
-if df_plot["Timestamp"].notna().any():
-    if df_plot["Yaw"].notna().any():
-        ax.plot(df_plot["Timestamp"], df_plot["Yaw"], label="Yaw", color="orange")
-        has_plotted = True
-    if df_plot["Pitch"].notna().any():
-        ax.plot(df_plot["Timestamp"], df_plot["Pitch"], label="Pitch", color="blue")
-        has_plotted = True
-    if df_plot["MAR"].notna().any():
-        ax.plot(df_plot["Timestamp"], df_plot["MAR"], label="MAR", color="green")
-        has_plotted = True
-    ax.set_xlabel("Time")
-else:
-    # fallback to index
-    if df_plot["Yaw"].notna().any():
-        ax.plot(df_plot.index, df_plot["Yaw"], label="Yaw", color="orange")
-        has_plotted = True
-    if df_plot["Pitch"].notna().any():
-        ax.plot(df_plot.index, df_plot["Pitch"], label="Pitch", color="blue")
-        has_plotted = True
-    if df_plot["MAR"].notna().any():
-        ax.plot(df_plot.index, df_plot["MAR"], label="MAR", color="green")
-        has_plotted = True
-    ax.set_xlabel("Record #")
-
-if has_plotted:
-    ax.set_ylabel("Value")
-    ax.legend()
-    ax.grid(True)
-    st.pyplot(fig)
-else:
-    st.info("No Yaw/Pitch/MAR numeric columns found to plot.")
-
-# Frequency over time (per minute)
-st.subheader("Events per minute")
-if "Timestamp" in df_plot.columns and df_plot["Timestamp"].notna().any():
-    df_counts = df_plot.set_index("Timestamp").resample("T").size()
-    fig2, ax2 = plt.subplots(figsize=(12, 3))
-    ax2.bar(df_counts.index, df_counts.values, width=0.01, color="red")
-    ax2.set_xlabel("Minute")
-    ax2.set_ylabel("Event count")
-    st.pyplot(fig2)
-else:
-    st.info("No timestamp column to compute per-minute counts.")
-
-# Recent events table
-st.subheader("Recent Events")
-if "Timestamp" in df_plot.columns:
-    df_recent = df_plot.sort_values("Timestamp", ascending=False).head(50)
-else:
-    df_recent = df_plot.tail(50)
-st.dataframe(df_recent.reset_index(drop=True))
-
-# Event breakdown (counts by Event column)
-st.subheader("Event Types")
-if "Event" in df_plot.columns and df_plot["Event"].notna().any():
-    types = df_plot["Event"].value_counts()
-    fig3, ax3 = plt.subplots(figsize=(6, 3))
-    ax3.pie(types.values, labels=types.index, autopct="%1.0f%%")
-    ax3.axis("equal")
-    st.pyplot(fig3)
-else:
-    st.info("No 'Event' column found in CSV (or it's empty).")
-
-# Manual refresh button (Streamlit reruns script on widget interaction)
-if st.button("Refresh"):
+auto_refresh = st.sidebar.checkbox("Auto refresh every 5 seconds")
+if auto_refresh:
     st.experimental_rerun()
 
 st.markdown("---")
-st.caption("If you want the dashboard to reflect live camera detections, run the detection script to write the CSV (then press Refresh). "
-           "To enable camera-based detection (which requires mediapipe), install mediapipe: `pip install mediapipe`.")
+st.caption("Developed by Venkat • Driver Vigilance Monitoring System © 2025")
