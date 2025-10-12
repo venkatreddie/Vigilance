@@ -4,6 +4,8 @@ import sqlite3
 import os
 import time
 import altair as alt
+import subprocess
+from datetime import datetime
 
 # -----------------------------
 # 🧩 Page Setup
@@ -39,12 +41,12 @@ def connect_db():
         conn.close()
     try:
         conn = sqlite3.connect(DB_PATH)
-        # Test if valid by fetching 1 record
         conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         return conn
     except Exception:
         # If corrupted, recreate
-        os.remove(DB_PATH)
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
         conn = sqlite3.connect(DB_PATH)
         conn.execute("""
             CREATE TABLE detection_logs (
@@ -73,11 +75,22 @@ def get_data():
         return pd.DataFrame(columns=["timestamp", "event_type", "confidence", "status"])
 
 # -----------------------------
-# ⚙️ Control Panel
+# ⚙️ Control Panel (Sidebar)
 # -----------------------------
 with st.sidebar:
     st.header("⚙️ Controls")
     refresh_rate = st.slider("Auto Refresh (seconds)", 2, 30, 10)
+    st.markdown("---")
+    st.subheader("🎥 Detection System")
+    st.write("Click below to launch the live distraction detection camera system:")
+
+    if st.button("▶️ Start Detection"):
+        try:
+            subprocess.Popen(["python", "distraction_detection.py"])
+            st.success("✅ Detection system started successfully!")
+        except Exception as e:
+            st.error(f"Failed to start detection: {e}")
+
     st.markdown("---")
     st.markdown("**Developed by Venkat 🚀**")
 
@@ -86,7 +99,6 @@ with st.sidebar:
 # -----------------------------
 df = get_data()
 
-# Metrics
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric("😴 Drowsiness Detected", len(df[df["event_type"] == "Drowsiness"]))
@@ -102,7 +114,11 @@ st.subheader("🧠 System Status")
 
 if not df.empty:
     latest_event = df.iloc[0]
-    st.success(f"**Last Event:** {latest_event['event_type']} | **Status:** {latest_event['status']} | **Confidence:** {latest_event['confidence']:.2f}")
+    st.success(
+        f"**Last Event:** {latest_event['event_type']} | "
+        f"**Status:** {latest_event['status']} | "
+        f"**Confidence:** {latest_event['confidence']:.2f}"
+    )
 else:
     st.warning("No recent data found. Waiting for detection input...")
 
