@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import os
-import time
 import subprocess
 import altair as alt
+import time
 
 # -----------------------------
 # 🧩 Page Setup
@@ -36,6 +36,14 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Developed by Venkat 🚀**")
+
+# -----------------------------
+# 🔁 Auto Refresh using timer
+# -----------------------------
+last_refresh = st.session_state.get("last_refresh", 0)
+if time.time() - last_refresh > refresh_rate:
+    st.session_state.last_refresh = time.time()
+    st.experimental_rerun()
 
 # -----------------------------
 # 📊 Load CSV Logs
@@ -92,7 +100,7 @@ if not df.empty:
             color=alt.value("orange"),
             tooltip=["Timestamp", "Yaw_deg", "Pitch_deg", "Event"]
         )
-        .properties(title="Head Yaw Trend", width="100%", height=250)
+        .properties(title="Head Yaw Trend", width="stretch", height=250)
     ) + (
         alt.Chart(df)
         .mark_line(point=True)
@@ -115,7 +123,7 @@ if not df.empty:
             color=alt.value("green"),
             tooltip=["Timestamp", "EAR", "MAR", "Event"]
         )
-        .properties(title="Eye & Mouth Aspect Ratio Trend", width="100%", height=250)
+        .properties(title="Eye & Mouth Aspect Ratio Trend", width="stretch", height=250)
     ) + (
         alt.Chart(df)
         .mark_line(point=True)
@@ -136,13 +144,6 @@ if not df.empty:
     st.dataframe(df.sort_values(by="Timestamp", ascending=False), use_container_width=True)
 else:
     st.info("No events logged yet.")
-
-# -----------------------------
-# Auto Refresh
-# -----------------------------
-st.markdown("### ⏳ Auto-refreshing in real-time...")
-time.sleep(refresh_rate)
-st.experimental_rerun()
 
 # -----------------------------
 # Footer
