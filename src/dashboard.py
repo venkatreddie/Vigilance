@@ -1,166 +1,169 @@
+import cv2
+import dlib
+import numpy as np
 import streamlit as st
-import pandas as pd
-import sqlite3
-import os
 import time
-import altair as alt
-import subprocess
+import sqlite3
+import winsound
 from datetime import datetime
+from scipy.spatial import distance
 
-# -----------------------------
-# 🧩 Page Setup
-# -----------------------------
-st.set_page_config(
-    page_title="Driver Vigilance Monitoring Dashboard",
-    page_icon="🚘",
-    layout="wide"
+# -----------------------------------
+# Database Setup
+# -----------------------------------
+conn = sqlite3.connect("driver_data.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS detections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event TEXT,
+    timestamp TEXT
 )
+""")
+conn.commit()
 
-st.title("🚘 Driver Vigilance Monitoring Dashboard")
-st.markdown("### Real-time Monitoring and Analytics for Drowsiness, Yawning & Distraction Detection")
+# -----------------------------------
+# Load Models
+# -----------------------------------
+detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
 
-# -----------------------------
-# 🗃️ Database Setup (Auto-Recovery)
-# -----------------------------
-DB_PATH = "detection_logs.db"
+# Thresholds
+EYE_AR_THRESH = 0.25
+YAWN_THRESH = 20
+ALERT_TIME = 10
 
-def connect_db():
-    """Create or connect to the SQLite database safely."""
-    if not os.path.exists(DB_PATH):
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("""
-            CREATE TABLE detection_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                event_type TEXT,
-                confidence REAL,
-                status TEXT
-            )
-        """)
-        conn.commit()
-        conn.close()
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        return conn
-    except Exception:
-        # If corrupted, recreate
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("""
-            CREATE TABLE detection_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                event_type TEXT,
-                confidence REAL,
-                status TEXT
-            )
-        """)
-        conn.commit()
-        return conn
+# -----------------------------------
+# Helper Functions
+# -----------------------------------
+def eye_aspect_ratio(eye_points):
+    A = distance.euclidean(eye_points[1], eye_points[5])
+    B = distance.euclidean(eye_points[2], eye_points[4])
+    C = distance.euclidean(eye_points[0], eye_points[3])
+    ear = (A + B) / (2.0 * C)
+    return ear
 
-def get_data():
-    """Fetch recent logs safely."""
-    try:
-        conn = connect_db()
-        df = pd.read_sql_query(
-            "SELECT timestamp, event_type, confidence, status FROM detection_logs ORDER BY timestamp DESC LIMIT 100",
-            conn
-        )
-        conn.close()
-        return df
-    except Exception as e:
-        st.error(f"Error reading database: {e}")
-        return pd.DataFrame(columns=["timestamp", "event_type", "confidence", "status"])
+def lip_distance(shape):
+    top_lip = shape[50:53] + shape[61:64]
+    bottom_lip = shape[56:59] + shape[65:68]
+    top_mean = np.mean(top_lip, axis=0)
+    bottom_mean = np.mean(bottom_lip, axis=0)
+    distance_lips = abs(top_mean[1] - bottom_mean[1])
+    return distance_lips
 
-# -----------------------------
-# ⚙️ Control Panel (Sidebar)
-# -----------------------------
-with st.sidebar:
-    st.header("⚙️ Controls")
-    refresh_rate = st.slider("Auto Refresh (seconds)", 2, 30, 10)
-    st.markdown("---")
-    st.subheader("🎥 Detection System")
-    st.write("Click below to launch the live distraction detection camera system:")
+def trigger_alert(event_type):
+    winsound.Beep(1000, 800)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("INSERT INTO detections (event, timestamp) VALUES (?, ?)", (event_type, timestamp))
+    conn.commit()
+    st.session_state["last_event"] = (event_type, timestamp)
 
-    if st.button("▶️ Start Detection"):
-        try:
-            subprocess.Popen(["python", "distraction_detection.py"])
-            st.success("✅ Detection system started successfully!")
-        except Exception as e:
-            st.error(f"Failed to start detection: {e}")
+# -----------------------------------
+# Streamlit UI Layout
+# -----------------------------------
+st.set_page_config(page_title="Driver Drowsiness Detection", layout="wide")
 
-    st.markdown("---")
-    st.markdown("**Developed by Venkat 🚀**")
+st.title("🚗 Driver Vigilance Monitoring System")
+st.markdown("Real-time **Drowsiness** and **Yawning** Detection using OpenCV, Dlib, and Streamlit")
 
-# -----------------------------
-# 📊 Data Section
-# -----------------------------
-df = get_data()
+col1, col2 = st.columns(2)
 
-col1, col2, col3 = st.columns(3)
+if "run" not in st.session_state:
+    st.session_state["run"] = False
+if "last_event" not in st.session_state:
+    st.session_state["last_event"] = None
+
+# Buttons
 with col1:
-    st.metric("😴 Drowsiness Detected", len(df[df["event_type"] == "Drowsiness"]))
-with col2:
-    st.metric("😮 Yawning Detected", len(df[df["event_type"] == "Yawning"]))
-with col3:
-    st.metric("📊 Total Alerts Logged", len(df))
+    start_btn = st.button("▶️ Start Detection")
+    stop_btn = st.button("⏹ Stop Detection")
 
-# -----------------------------
-# 🧠 System Status
-# -----------------------------
-st.subheader("🧠 System Status")
+if start_btn:
+    st.session_state["run"] = True
+if stop_btn:
+    st.session_state["run"] = False
 
-if not df.empty:
-    latest_event = df.iloc[0]
-    st.success(
-        f"**Last Event:** {latest_event['event_type']} | "
-        f"**Status:** {latest_event['status']} | "
-        f"**Confidence:** {latest_event['confidence']:.2f}"
-    )
-else:
-    st.warning("No recent data found. Waiting for detection input...")
+# Live video and logs
+FRAME_WINDOW = col1.image([])
+status_placeholder = col2.empty()
+event_log = col2.empty()
 
-# -----------------------------
-# 📈 Activity Graph
-# -----------------------------
-if not df.empty:
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    chart = (
-        alt.Chart(df)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("timestamp:T", title="Time"),
-            y=alt.Y("confidence:Q", title="Confidence Level"),
-            color=alt.Color("event_type:N", title="Event Type"),
-            tooltip=["timestamp", "event_type", "confidence", "status"]
-        )
-        .properties(title="Recent Detection Confidence Trends", width="stretch", height=350)
-    )
-    st.altair_chart(chart, use_container_width=True)
-else:
-    st.info("No data available for graph visualization.")
+# -----------------------------------
+# Detection Logic
+# -----------------------------------
+eye_closed_start = None
+yawn_start = None
+last_alert_time = 0
 
-# -----------------------------
-# 🪵 Log Viewer
-# -----------------------------
-st.subheader("🪵 Recent Detection Logs")
+cap = cv2.VideoCapture(0)
 
-if not df.empty:
-    st.dataframe(df, use_container_width=True)
-else:
-    st.info("No detection logs found yet.")
+while st.session_state["run"]:
+    ret, frame = cap.read()
+    if not ret:
+        st.warning("⚠️ Cannot access webcam!")
+        break
 
-# -----------------------------
-# 🔁 Auto Refresh
-# -----------------------------
-st.markdown("### ⏳ Auto-refreshing in real-time...")
-time.sleep(refresh_rate)
-st.rerun()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = detector(gray)
 
-# -----------------------------
-# 🧾 Footer
-# -----------------------------
-st.markdown("---")
-st.markdown("© 2025 **Driver Vigilance** | Developed by **Venkat**")
+    event_message = "Monitoring..."
+
+    for face in faces:
+        shape = predictor(gray, face)
+        shape_np = np.zeros((68, 2), dtype=int)
+        for i in range(68):
+            shape_np[i] = (shape.part(i).x, shape.part(i).y)
+
+        left_eye = shape_np[42:48]
+        right_eye = shape_np[36:42]
+        ear = (eye_aspect_ratio(left_eye) + eye_aspect_ratio(right_eye)) / 2.0
+
+        lip_dist = lip_distance(shape_np)
+
+        # Drowsiness Detection
+        if ear < EYE_AR_THRESH:
+            if eye_closed_start is None:
+                eye_closed_start = time.time()
+            elif time.time() - eye_closed_start > ALERT_TIME:
+                trigger_alert("Drowsiness Detected")
+                event_message = "😴 Drowsiness Detected!"
+        else:
+            eye_closed_start = None
+
+        # Yawning Detection
+        if lip_dist > YAWN_THRESH:
+            if yawn_start is None:
+                yawn_start = time.time()
+            elif time.time() - yawn_start > 3:
+                trigger_alert("Yawning Detected")
+                event_message = "😮 Yawning Detected!"
+        else:
+            yawn_start = None
+
+        # Draw visual feedback
+        cv2.rectangle(frame, (face.left(), face.top()), (face.right(), face.bottom()), (0, 255, 0), 2)
+        cv2.putText(frame, f"EAR: {ear:.2f}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        cv2.putText(frame, f"Lip: {int(lip_dist)}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        cv2.putText(frame, event_message, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    FRAME_WINDOW.image(frame)
+
+    # UI status
+    if st.session_state["last_event"]:
+        e, t = st.session_state["last_event"]
+        status_placeholder.markdown(f"### 🚨 Latest Event: **{e}** at {t}")
+    else:
+        status_placeholder.markdown("### ✅ No Alerts Yet")
+
+    # Event Log Table
+    cursor.execute("SELECT event, timestamp FROM detections ORDER BY id DESC LIMIT 5")
+    rows = cursor.fetchall()
+    if rows:
+        event_log.dataframe(rows, use_container_width=True)
+    else:
+        event_log.info("No records yet...")
+
+    time.sleep(0.05)
+
+cap.release()
