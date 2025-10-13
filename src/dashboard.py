@@ -1,7 +1,6 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import time
 import os
 
 # -----------------------------
@@ -10,7 +9,6 @@ import os
 def get_db_connection(db_path="vigilance.db"):
     try:
         conn = sqlite3.connect(db_path, check_same_thread=False)
-        # Quick validity test
         conn.execute("SELECT name FROM sqlite_master LIMIT 1;")
         return conn
     except sqlite3.DatabaseError:
@@ -34,7 +32,7 @@ def get_db_connection(db_path="vigilance.db"):
             return None
 
 # -----------------------------
-# Initialize Streamlit layout
+# Streamlit Page Config
 # -----------------------------
 st.set_page_config(
     page_title="Driver Vigilance Dashboard",
@@ -49,19 +47,24 @@ st.caption("Real-time Monitoring and Analytics for Drowsiness, Yawning & Distrac
 # Sidebar Controls
 # -----------------------------
 st.sidebar.header("⚙️ Controls")
+refresh_interval = st.sidebar.slider("Auto Refresh Interval (seconds)", 2, 30, 5)
 
-auto_refresh = st.sidebar.checkbox("Auto Refresh (seconds)", value=True)
-refresh_interval = st.sidebar.slider("Set Refresh Interval", 2, 30, 5)
+# This is the proper Streamlit method for live updates:
+st_autorefresh = st.sidebar.checkbox("Enable Auto Refresh", value=True)
+if st_autorefresh:
+    st_autorefresh = st.experimental_rerun
+    st_autorefresh = st.experimental_rerun
+st_autorefresh_count = st.experimental_rerun if st_autorefresh else 0
 
 # -----------------------------
-# Connect or recover database
+# Connect or Recover DB
 # -----------------------------
 conn = get_db_connection()
 if conn is None:
     st.stop()
 
 # -----------------------------
-# Function to fetch data
+# Load Detection Data
 # -----------------------------
 def load_data():
     try:
@@ -83,35 +86,44 @@ def load_data():
             return pd.DataFrame()
 
 # -----------------------------
-# Dashboard Metrics Section
+# Display Live Dashboard
 # -----------------------------
-placeholder = st.empty()
+df = load_data()
 
-while True:
-    with placeholder.container():
-        df = load_data()
+col1, col2, col3 = st.columns(3)
+if not df.empty:
+    drowsiness_count = len(df[df['event_type'] == 'drowsiness'])
+    yawning_count = len(df[df['event_type'] == 'yawning'])
+    total_alerts = len(df)
 
-        if not df.empty:
-            drowsiness_count = len(df[df['event_type'] == 'drowsiness'])
-            yawning_count = len(df[df['event_type'] == 'yawning'])
-            total_alerts = len(df)
+    with col1:
+        st.metric("😴 Drowsiness Detected", drowsiness_count)
+    with col2:
+        st.metric("😮 Yawning Detected", yawning_count)
+    with col3:
+        st.metric("📊 Total Alerts Logged", total_alerts)
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("😴 Drowsiness Detected", drowsiness_count)
-            with col2:
-                st.metric("😮 Yawning Detected", yawning_count)
-            with col3:
-                st.metric("📊 Total Alerts Logged", total_alerts)
+    st.subheader("🧠 System Status (Last 100 Records)")
+    st.dataframe(df, width='stretch', height=300)
 
-            st.subheader("🧠 System Status")
-            st.dataframe(df, width='stretch', height=300)
+    # Trend chart
+    st.subheader("📈 Detection Confidence Over Time")
+    chart_df = df[['timestamp', 'confidence']]
+    chart_df['timestamp'] = pd.to_datetime(chart_df['timestamp'], errors='coerce')
+    chart_df = chart_df.dropna()
+    if not chart_df.empty:
+        st.line_chart(chart_df, x='timestamp', y='confidence')
+    else:
+        st.info("No valid timestamp data for chart.")
+else:
+    st.warning("No recent data found. Waiting for detection input...")
 
-        else:
-            st.warning("No recent data found. Waiting for detection input...")
+st.caption("© 2025 Driver Vigilance | Developed by Venkat")
 
-        st.caption("© 2025 Driver Vigilance | Developed by Venkat")
-
-    if not auto_refresh:
-        break
+# -----------------------------
+# Auto-refresh logic
+# -----------------------------
+if st_autorefresh:
+    import time
     time.sleep(refresh_interval)
+    st.experimental_rerun()
