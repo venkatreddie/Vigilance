@@ -1,114 +1,114 @@
 import cv2
 import mediapipe as mp
+import numpy as np
+import math
 import time
 import csv
 import os
 import winsound
-import numpy as np
-import math
 
-# ===== CONFIG =====
+# =========================
+# CONFIG
+# =========================
 LOG_FILE = "distraction_log.csv"
-
-# Head-pose thresholds
-DISTRACTION_YAW = 20.0
-DISTRACTION_PITCH = 15.0
-STRAIGHT_YAW = 12.0
-STRAIGHT_PITCH = 8.0
-DISTRACTION_DURATION = 10.0
-ALERT_REPEAT_INTERVAL = 2.0
-
-# EAR/MAR thresholds
-EAR_THRESHOLD = 0.22  # eyes closed
-EAR_DURATION = 3.0    # seconds
-MAR_THRESHOLD = 0.6   # yawning
-MAR_DURATION = 2.0    # seconds
-
-# Beep settings
+EAR_THRESHOLD = 0.25        # Eyes closed threshold
+EAR_CONSEC_FRAMES = 15      # Frames eyes must be below threshold to trigger drowsiness
+MAR_THRESHOLD = 0.7         # Mouth open threshold for yawning
+DISTRACTION_YAW = 20.0      # Head yaw threshold
+DISTRACTION_PITCH = 15.0    # Head pitch threshold
+DISTRACTION_DURATION = 10.0 # Seconds before distraction alert
 BEEP_FREQ = 2000
 BEEP_DUR_MS = 200
 
-# ===== SETUP =====
+# =========================
+# SETUP
+# =========================
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
+# CSV log setup
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Timestamp", "Yaw_deg", "Pitch_deg", "EAR", "MAR", "Event"])
+        writer.writerow(["Timestamp","Yaw_deg","Pitch_deg","EAR","MAR","Event"])
 
-# ===== FUNCTIONS =====
-def rotationMatrixToEulerAngles(R):
-    sy = math.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
-    singular = sy < 1e-6
-    if not singular:
-        x = math.atan2(R[2,1], R[2,2])   # roll
-        y = math.atan2(-R[2,0], sy)      # pitch
-        z = math.atan2(R[1,0], R[0,0])   # yaw
-    else:
-        x = math.atan2(-R[1,2], R[1,1])
-        y = math.atan2(-R[2,0], sy)
-        z = 0
-    return np.degrees([x, y, z])  # roll, pitch, yaw
-
+# Beep function
 def beep():
     try:
         winsound.Beep(BEEP_FREQ, BEEP_DUR_MS)
-    except Exception:
+    except:
         pass
 
-def eye_aspect_ratio(eye_landmarks):
-    # EAR approximation using eye bounding rectangle
-    if len(eye_landmarks) == 0:
-        return 0
-    xs = [p[0] for p in eye_landmarks]
-    ys = [p[1] for p in eye_landmarks]
-    w = max(xs) - min(xs)
-    h = max(ys) - min(ys)
-    return h / w if w > 0 else 0
+# Compute EAR
+def eye_aspect_ratio(landmarks, left_idx, right_idx):
+    left = np.array([landmarks[i] for i in left_idx])
+    right = np.array([landmarks[i] for i in right_idx])
+    # vertical distances
+    A = np.linalg.norm(left[1]-left[5])
+    B = np.linalg.norm(left[2]-left[4])
+    C = np.linalg.norm(left[0]-left[3])
+    ear_left = (A+B)/(2.0*C)
+    # Right eye
+    A = np.linalg.norm(right[1]-right[5])
+    B = np.linalg.norm(right[2]-right[4])
+    C = np.linalg.norm(right[0]-right[3])
+    ear_right = (A+B)/(2.0*C)
+    return (ear_left + ear_right)/2.0
 
-def mouth_aspect_ratio(mouth_landmarks):
-    # MAR approximation using mouth bounding rectangle
-    if len(mouth_landmarks) == 0:
-        return 0
-    xs = [p[0] for p in mouth_landmarks]
-    ys = [p[1] for p in mouth_landmarks]
-    w = max(xs) - min(xs)
-    h = max(ys) - min(ys)
-    return h / w if w > 0 else 0
+# Compute MAR
+def mouth_aspect_ratio(landmarks, mouth_idx):
+    mouth = np.array([landmarks[i] for i in mouth_idx])
+    A = np.linalg.norm(mouth[13]-mouth[19]) # vertical
+    B = np.linalg.norm(mouth[14]-mouth[18])
+    C = np.linalg.norm(mouth[15]-mouth[17])
+    D = np.linalg.norm(mouth[0]-mouth[6])   # horizontal
+    mar = (A+B+C)/(3.0*D)
+    return mar
 
-# Face landmarks for head-pose (PnP)
+# Head Pose Utilities
 MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),
-    (0.0, -330.0, -65.0),
-    (-225.0, 170.0, -135.0),
-    (225.0, 170.0, -135.0),
-    (-150.0, -150.0, -125.0),
-    (150.0, -150.0, -125.0)
+    (0.0, 0.0, 0.0),           # Nose tip
+    (0.0, -330.0, -65.0),      # Chin
+    (-225.0, 170.0, -135.0),   # Left eye corner
+    (225.0, 170.0, -135.0),    # Right eye corner
+    (-150.0, -150.0, -125.0),  # Left mouth corner
+    (150.0, -150.0, -125.0)    # Right mouth corner
 ], dtype=np.float64)
 
 LMKS_IDX = [1, 199, 33, 263, 61, 291]
 
-# ===== STATE VARIABLES =====
-alert_head = False
-alert_drowsy = False
-alert_yawn = False
+def rotationMatrixToEulerAngles(R):
+    sy = math.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
+    singular = sy < 1e-6
+    if not singular:
+        x = math.atan2(R[2,1], R[2,2])
+        y = math.atan2(-R[2,0], sy)
+        z = math.atan2(R[1,0], R[0,0])
+    else:
+        x = math.atan2(-R[1,2], R[1,1])
+        y = math.atan2(-R[2,0], sy)
+        z = 0
+    return np.degrees([x,y,z])
 
-head_start_time = None
-drowsy_start_time = None
-yawn_start_time = None
+# Indices for eyes and mouth (MediaPipe)
+LEFT_EYE_IDX = [33,160,158,133,153,144]
+RIGHT_EYE_IDX = [362,385,387,263,373,380]
+MOUTH_IDX = [61,81,13,311,308,402,317,14,87,178,88,95,78,191,80,81,82,13,312,311] 
 
-last_head_beep = 0
-last_drowsy_beep = 0
-last_yawn_beep = 0
-
-logged_head = False
-logged_drowsy = False
-logged_yawn = False
-
+# =========================
+# VIDEO CAPTURE
+# =========================
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     raise RuntimeError("Cannot open camera")
+
+ear_counter = 0
+yawn_counter = 0
+distraction_start_time = None
+alert_active = False
+drowsy_alerted = False
+yawn_alerted = False
+distraction_logged = False
 
 try:
     while True:
@@ -116,154 +116,111 @@ try:
         if not ret:
             break
 
-        h, w = frame.shape[:2]
+        h,w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb)
 
         if results.multi_face_landmarks:
-            lm = results.multi_face_landmarks[0].landmark
+            lm_raw = results.multi_face_landmarks[0].landmark
+            lm = [(int(p.x*w), int(p.y*h)) for p in lm_raw]
 
-            # ===== Head-pose =====
-            try:
-                image_points = np.array([
-                    (lm[LMKS_IDX[0]].x * w, lm[LMKS_IDX[0]].y * h),
-                    (lm[LMKS_IDX[1]].x * w, lm[LMKS_IDX[1]].y * h),
-                    (lm[LMKS_IDX[2]].x * w, lm[LMKS_IDX[2]].y * h),
-                    (lm[LMKS_IDX[3]].x * w, lm[LMKS_IDX[3]].y * h),
-                    (lm[LMKS_IDX[4]].x * w, lm[LMKS_IDX[4]].y * h),
-                    (lm[LMKS_IDX[5]].x * w, lm[LMKS_IDX[5]].y * h)
-                ], dtype=np.float64)
+            # Compute EAR and MAR
+            ear = eye_aspect_ratio(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX)
+            mar = mouth_aspect_ratio(lm, MOUTH_IDX)
 
-                focal_length = w
-                center = (w/2.0, h/2.0)
-                camera_matrix = np.array([
-                    [focal_length, 0, center[0]],
-                    [0, focal_length, center[1]],
-                    [0, 0, 1]
-                ], dtype=np.float64)
-                dist_coeffs = np.zeros((4,1))
+            # Head Pose
+            image_points = np.array([lm[i] for i in LMKS_IDX], dtype=np.float64)
+            focal_length = w
+            center = (w/2.0,h/2.0)
+            camera_matrix = np.array([[focal_length,0,center[0]], [0,focal_length,center[1]], [0,0,1]], dtype=np.float64)
+            dist_coeffs = np.zeros((4,1))
+            success, rotation_vector, _ = cv2.solvePnP(MODEL_POINTS, image_points, camera_matrix, dist_coeffs)
+            R,_ = cv2.Rodrigues(rotation_vector)
+            roll,pitch,yaw = rotationMatrixToEulerAngles(R)
 
-                success, rotation_vector, translation_vector = cv2.solvePnP(
-                    MODEL_POINTS, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-                )
-
-                if success:
-                    R_mat, _ = cv2.Rodrigues(rotation_vector)
-                    roll_deg, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R_mat)
-
-                    # Draw angles
-                    cv2.putText(frame, f"Yaw:{yaw_deg:.2f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-                    cv2.putText(frame, f"Pitch:{pitch_deg:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-
-                    now = time.time()
-                    is_distracted = (abs(yaw_deg) > DISTRACTION_YAW) or (pitch_deg > DISTRACTION_PITCH)
-                    is_straight = (abs(yaw_deg) <= STRAIGHT_YAW) and (abs(pitch_deg) <= STRAIGHT_PITCH)
-
-                    # ===== Head-pose alert =====
-                    if is_distracted:
-                        if head_start_time is None:
-                            head_start_time = now
-                            logged_head = False
-                        elif (now - head_start_time) >= DISTRACTION_DURATION:
-                            if not alert_head:
-                                alert_head = True
-                                beep()
-                                if not logged_head:
-                                    with open(LOG_FILE, "a", newline="") as f:
-                                        writer = csv.writer(f)
-                                        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                         round(yaw_deg,2), round(pitch_deg,2), "N/A", "N/A", "Distraction Started"])
-                                    logged_head = True
-                                last_head_beep = now
-                            elif (now - last_head_beep) >= ALERT_REPEAT_INTERVAL:
-                                beep()
-                                last_head_beep = now
-                    elif is_straight:
-                        if alert_head and logged_head:
-                            with open(LOG_FILE, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                 round(yaw_deg,2), round(pitch_deg,2), "N/A", "N/A", "Distraction Ended"])
-                        alert_head = False
-                        head_start_time = None
-                        logged_head = False
-
-            except Exception:
-                cv2.putText(frame, "Head-pose error", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
-
-            # ===== Eyes & Mouth (Drowsiness & Yawning) =====
-            # Simplified: Use bounding box of eyes and mouth
-            h_lm = [(lm[i].x * w, lm[i].y * h) for i in range(len(lm))]
-            # Example landmarks (left eye: 33-133, right eye: 362-263, mouth: 61-291)
-            left_eye = h_lm[33:133]
-            right_eye = h_lm[362:263] if 362 < 263 else h_lm[263:362]
-            mouth = h_lm[61:291]
-
-            ear = (eye_aspect_ratio(left_eye) + eye_aspect_ratio(right_eye)) / 2
-            mar = mouth_aspect_ratio(mouth)
-
-            # ===== Drowsiness alert =====
+            # -----------------------
+            # Drowsiness Detection
+            # -----------------------
             if ear < EAR_THRESHOLD:
-                if drowsy_start_time is None:
-                    drowsy_start_time = now
-                    logged_drowsy = False
-                elif now - drowsy_start_time >= EAR_DURATION:
-                    if not alert_drowsy:
-                        alert_drowsy = True
-                        beep()
-                        if not logged_drowsy:
-                            with open(LOG_FILE, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                 "N/A","N/A", round(ear,2), "N/A", "Drowsiness"])
-                            logged_drowsy = True
-                        last_drowsy_beep = now
-                    elif now - last_drowsy_beep >= ALERT_REPEAT_INTERVAL:
-                        beep()
-                        last_drowsy_beep = now
+                ear_counter += 1
+                if ear_counter >= EAR_CONSEC_FRAMES and not drowsy_alerted:
+                    beep()
+                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    with open(LOG_FILE,"a",newline="") as f:
+                        csv.writer(f).writerow([timestamp, yaw, pitch, round(ear,2), round(mar,2), "Drowsiness"])
+                    drowsy_alerted = True
             else:
-                alert_drowsy = False
-                drowsy_start_time = None
-                logged_drowsy = False
+                ear_counter = 0
+                drowsy_alerted = False
 
-            # ===== Yawning alert =====
-            if mar > MAR_THRESHOLD:
-                if yawn_start_time is None:
-                    yawn_start_time = now
-                    logged_yawn = False
-                elif now - yawn_start_time >= MAR_DURATION:
-                    if not alert_yawn:
-                        alert_yawn = True
+            # -----------------------
+            # Yawning Detection
+            # -----------------------
+            if mar > MAR_THRESHOLD and not yawn_alerted:
+                beep()
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                with open(LOG_FILE,"a",newline="") as f:
+                    csv.writer(f).writerow([timestamp, yaw, pitch, round(ear,2), round(mar,2), "Yawning"])
+                yawn_alerted = True
+            elif mar <= MAR_THRESHOLD:
+                yawn_alerted = False
+
+            # -----------------------
+            # Distraction Detection
+            # -----------------------
+            is_distracted = abs(yaw) > DISTRACTION_YAW or pitch > DISTRACTION_PITCH
+            is_straight = abs(yaw) <= 12 and abs(pitch) <= 8
+            now = time.time()
+
+            if is_distracted:
+                if distraction_start_time is None:
+                    distraction_start_time = now
+                    distraction_logged = False
+                elif now - distraction_start_time >= DISTRACTION_DURATION:
+                    if not alert_active:
                         beep()
-                        if not logged_yawn:
-                            with open(LOG_FILE, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                 "N/A","N/A","N/A", round(mar,2), "Yawning"])
-                            logged_yawn = True
-                        last_yawn_beep = now
-                    elif now - last_yawn_beep >= ALERT_REPEAT_INTERVAL:
-                        beep()
-                        last_yawn_beep = now
-            else:
-                alert_yawn = False
-                yawn_start_time = None
-                logged_yawn = False
+                        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                        if not distraction_logged:
+                            with open(LOG_FILE,"a",newline="") as f:
+                                csv.writer(f).writerow([timestamp, yaw, pitch, round(ear,2), round(mar,2), "Distraction Started"])
+                            distraction_logged = True
+                        alert_active = True
+            elif is_straight:
+                if alert_active and distraction_logged:
+                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    with open(LOG_FILE,"a",newline="") as f:
+                        csv.writer(f).writerow([timestamp, yaw, pitch, round(ear,2), round(mar,2), "Distraction Ended"])
+                alert_active = False
+                distraction_start_time = None
+                distraction_logged = False
+
+            # -----------------------
+            # Display Frame
+            # -----------------------
+            cv2.putText(frame, f"EAR:{ear:.2f}", (10,25), cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
+            cv2.putText(frame, f"MAR:{mar:.2f}", (10,55), cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
+            cv2.putText(frame, f"Yaw:{yaw:.2f}", (10,85), cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
+            cv2.putText(frame, f"Pitch:{pitch:.2f}", (10,115), cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
+
+            if drowsy_alerted:
+                cv2.putText(frame,"⚠ DROWSINESS DETECTED ⚠",(50,150),cv2.FONT_HERSHEY_SIMPLEX,1.0,(0,0,255),3)
+            if yawn_alerted:
+                cv2.putText(frame,"⚠ YAWNING DETECTED ⚠",(50,200),cv2.FONT_HERSHEY_SIMPLEX,1.0,(0,0,255),3)
+            if alert_active:
+                cv2.putText(frame,"⚠ DISTRACTION DETECTED ⚠",(50,250),cv2.FONT_HERSHEY_SIMPLEX,1.0,(0,0,255),3)
 
         else:
-            cv2.putText(frame, "No face detected", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
-            alert_head = alert_drowsy = alert_yawn = False
-            head_start_time = drowsy_start_time = yawn_start_time = None
-            logged_head = logged_drowsy = logged_yawn = False
+            cv2.putText(frame,"No face detected",(10,25),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
+            ear_counter = 0
+            drowsy_alerted = False
+            yawn_alerted = False
+            alert_active = False
+            distraction_start_time = None
+            distraction_logged = False
 
-        # ===== Draw warnings =====
-        if alert_head or alert_drowsy or alert_yawn:
-            cv2.rectangle(frame, (80, 40), (w-80, 130), (0, 0, 255), -1)
-            cv2.putText(frame, "⚠ ALERT DETECTED ⚠", (100, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255,255,255), 3)
-
-        cv2.imshow("Driver Vigilance System", frame)
+        cv2.imshow("Driver Vigilance Detection", frame)
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q') or key == 27:
+        if key == ord('q') or key==27:
             break
 
 finally:
