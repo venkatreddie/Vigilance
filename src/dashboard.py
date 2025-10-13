@@ -4,7 +4,6 @@ import os
 import time
 import subprocess
 import altair as alt
-from datetime import datetime
 
 # -----------------------------
 # 🧩 Page Setup
@@ -16,21 +15,21 @@ st.set_page_config(
 )
 
 st.title("🚘 Driver Vigilance Monitoring Dashboard")
-st.markdown("### Real-time Monitoring and Analytics for Distraction Detection")
+st.markdown("### Real-time Monitoring and Analytics for Distraction, Drowsiness & Yawning")
 
 # -----------------------------
-# ⚙️ Control Panel (Sidebar)
+# ⚙️ Sidebar Controls
 # -----------------------------
 with st.sidebar:
     st.header("⚙️ Controls")
     refresh_rate = st.slider("Auto Refresh (seconds)", 2, 30, 5)
     st.markdown("---")
     st.subheader("🎥 Detection System")
-    st.write("Click below to launch the live distraction detection camera system:")
+    st.write("Click below to launch the live detection camera:")
 
     if st.button("▶️ Start Detection"):
         try:
-            subprocess.Popen(["python", "distraction_detection.py"])
+            subprocess.Popen(["python", "detection_system.py"])
             st.success("✅ Detection system started successfully!")
         except Exception as e:
             st.error(f"Failed to start detection: {e}")
@@ -39,73 +38,114 @@ with st.sidebar:
     st.markdown("**Developed by Venkat 🚀**")
 
 # -----------------------------
-# 📊 Data Section (CSV Logs)
+# 📊 Load CSV Logs
 # -----------------------------
 LOG_FILE = "distraction_log.csv"
 if os.path.exists(LOG_FILE):
     df = pd.read_csv(LOG_FILE)
 else:
-    df = pd.DataFrame(columns=["Timestamp", "Yaw_deg", "Pitch_deg", "Event"])
+    df = pd.DataFrame(columns=["Timestamp", "Yaw_deg", "Pitch_deg", "EAR", "MAR", "Event"])
 
-col1, col2, col3 = st.columns(3)
+# -----------------------------
+# Metrics
+# -----------------------------
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("🟠 Distraction Started", len(df[df["Event"]=="Distraction Started"]))
 with col2:
     st.metric("🟢 Distraction Ended", len(df[df["Event"]=="Distraction Ended"]))
 with col3:
-    st.metric("📊 Total Events Logged", len(df))
+    st.metric("😴 Drowsiness Detected", len(df[df["Event"]=="Drowsiness"]))
+with col4:
+    st.metric("😮 Yawning Detected", len(df[df["Event"]=="Yawning"]))
 
 # -----------------------------
-# 🧠 Latest Event
+# Latest Event
 # -----------------------------
-st.subheader("🧠 Last Detected Event")
+st.subheader("🧠 Latest Event")
 if not df.empty:
     latest_event = df.iloc[-1]
     st.success(
         f"**Event:** {latest_event['Event']} | "
-        f"**Yaw:** {latest_event['Yaw_deg']:.2f} | "
-        f"**Pitch:** {latest_event['Pitch_deg']:.2f} | "
+        f"**Yaw:** {latest_event['Yaw_deg']} | "
+        f"**Pitch:** {latest_event['Pitch_deg']} | "
+        f"**EAR:** {latest_event['EAR']} | "
+        f"**MAR:** {latest_event['MAR']} | "
         f"**Timestamp:** {latest_event['Timestamp']}"
     )
 else:
     st.info("No events logged yet.")
 
 # -----------------------------
-# 📈 Graph of Yaw & Pitch
+# Graphs
 # -----------------------------
 if not df.empty:
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-    chart = (
+    
+    # Yaw & Pitch
+    yaw_pitch_chart = (
         alt.Chart(df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("Timestamp:T", title="Time"),
+            x="Timestamp:T",
             y=alt.Y("Yaw_deg:Q", title="Yaw (deg)"),
-            color=alt.Color("Event:N"),
+            color=alt.value("orange"),
             tooltip=["Timestamp", "Yaw_deg", "Pitch_deg", "Event"]
         )
-        .properties(title="Head Yaw Trend")
+        .properties(title="Head Yaw Trend", width="100%", height=250)
+    ) + (
+        alt.Chart(df)
+        .mark_line(point=True)
+        .encode(
+            x="Timestamp:T",
+            y=alt.Y("Pitch_deg:Q", title="Pitch (deg)"),
+            color=alt.value("cyan"),
+            tooltip=["Timestamp", "Yaw_deg", "Pitch_deg", "Event"]
+        )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(yaw_pitch_chart, use_container_width=True)
+
+    # EAR & MAR
+    ear_mar_chart = (
+        alt.Chart(df)
+        .mark_line(point=True)
+        .encode(
+            x="Timestamp:T",
+            y="EAR:Q",
+            color=alt.value("green"),
+            tooltip=["Timestamp", "EAR", "MAR", "Event"]
+        )
+        .properties(title="Eye & Mouth Aspect Ratio Trend", width="100%", height=250)
+    ) + (
+        alt.Chart(df)
+        .mark_line(point=True)
+        .encode(
+            x="Timestamp:T",
+            y="MAR:Q",
+            color=alt.value("red"),
+            tooltip=["Timestamp", "EAR", "MAR", "Event"]
+        )
+    )
+    st.altair_chart(ear_mar_chart, use_container_width=True)
 
 # -----------------------------
-# 🪵 Recent Logs
+# Recent Logs
 # -----------------------------
-st.subheader("🪵 Recent Distraction Logs")
+st.subheader("🪵 Recent Events")
 if not df.empty:
     st.dataframe(df.sort_values(by="Timestamp", ascending=False), use_container_width=True)
 else:
-    st.info("No logs found yet.")
+    st.info("No events logged yet.")
 
 # -----------------------------
-# 🔁 Auto Refresh
+# Auto Refresh
 # -----------------------------
 st.markdown("### ⏳ Auto-refreshing in real-time...")
 time.sleep(refresh_rate)
 st.experimental_rerun()
 
 # -----------------------------
-# 🧾 Footer
+# Footer
 # -----------------------------
 st.markdown("---")
 st.markdown("© 2025 **Driver Vigilance** | Developed by **Venkat**")
