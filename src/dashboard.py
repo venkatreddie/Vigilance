@@ -1,5 +1,4 @@
 import cv2
-import numpy as np
 import streamlit as st
 import time
 import pygame
@@ -7,38 +6,19 @@ from datetime import datetime
 
 # Initialize pygame for sound
 pygame.mixer.init()
-
-# Sound alert file (use any short beep sound)
 ALERT_SOUND = "alert.wav"
 
-# Load Haar cascades for face, eyes, and mouth
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
-mouth_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_smile.xml")
-
-# Initialize detection timers
-drowsy_start = None
-yawn_start = None
-distraction_start = None
-
 def play_alert():
-    pygame.mixer.music.load(ALERT_SOUND)
-    pygame.mixer.music.play()
+    try:
+        pygame.mixer.music.load(ALERT_SOUND)
+        pygame.mixer.music.play()
+    except Exception:
+        pass
 
-def detect_drowsiness(eyes):
-    """If no eyes detected, assume possible drowsiness."""
-    return len(eyes) == 0
-
-def detect_yawning(mouth):
-    """If mouth region large enough, assume yawning."""
-    for (x, y, w, h) in mouth:
-        if h > 30:  # adjust based on camera distance
-            return True
-    return False
-
-def detect_distraction(face_detected):
-    """If no face detected for a while -> distraction."""
-    return not face_detected
+# Load Haar cascades
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+eye_cascade = cv2.CascadeClassifier('haarcascade_eye.xml')
+mouth_cascade = cv2.CascadeClassifier('haarcascade_mcs_mouth.xml')
 
 def log_event(event_type, logs):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -47,11 +27,11 @@ def log_event(event_type, logs):
 
 def main():
     st.set_page_config(page_title="Driver Vigilance Detection", layout="wide")
-    st.title("🚗 Driver Vigilance Monitoring System")
+    st.title("🚗 Driver Vigilance Detection Dashboard")
 
     st.sidebar.header("Settings")
     detection_mode = st.sidebar.radio("Select Detection Mode", ["All", "Drowsiness", "Yawning", "Distraction"])
-    st.sidebar.info("Alerts will trigger after 5 seconds of continuous detection.")
+    st.sidebar.info("Alerts trigger after 5 seconds of continuous detection.")
 
     start_button = st.sidebar.button("Start Camera")
     stop_button = st.sidebar.button("Stop Camera")
@@ -69,11 +49,14 @@ def main():
     frame_window = st.empty()
     status_placeholder = st.empty()
 
+    cap = None
+    drowsy_start = None
+    yawn_start = None
+    distraction_start = None
+
     if st.session_state.run:
         cap = cv2.VideoCapture(0)
-
-        global drowsy_start, yawn_start, distraction_start
-        drowsy_start = yawn_start = distraction_start = None
+        st.success("Camera started successfully! Please wait...")
 
         while st.session_state.run:
             ret, frame = cap.read()
@@ -91,12 +74,12 @@ def main():
                     roi_gray = gray[y:y+h, x:x+w]
                     roi_color = frame[y:y+h, x:x+w]
 
-                    eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 4)
-                    mouth = mouth_cascade.detectMultiScale(roi_gray, 1.5, 15)
+                    eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 5, minSize=(30, 30))
+                    mouths = mouth_cascade.detectMultiScale(roi_gray, 1.5, 11)
 
-                    # Detection logic
+                    # Drowsiness detection (no eyes)
                     if detection_mode in ["All", "Drowsiness"]:
-                        if detect_drowsiness(eyes):
+                        if len(eyes) == 0:
                             if drowsy_start is None:
                                 drowsy_start = time.time()
                             elif time.time() - drowsy_start > 5:
@@ -104,23 +87,28 @@ def main():
                         else:
                             drowsy_start = None
 
+                    # Yawning detection (mouth detected)
                     if detection_mode in ["All", "Yawning"]:
-                        if detect_yawning(mouth):
-                            if yawn_start is None:
-                                yawn_start = time.time()
-                            elif time.time() - yawn_start > 5:
-                                yawn = True
+                        if len(mouths) > 0:
+                            # filter false detections by position
+                            for (mx, my, mw, mh) in mouths:
+                                if y + my > y + h/2:  # ensure it's lower half
+                                    if yawn_start is None:
+                                        yawn_start = time.time()
+                                    elif time.time() - yawn_start > 5:
+                                        yawn = True
+                                    break
                         else:
                             yawn_start = None
 
+                    # Draw detections
                     for (ex, ey, ew, eh) in eyes:
-                        cv2.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
-                    for (mx, my, mw, mh) in mouth:
-                        cv2.rectangle(roi_color, (mx, my), (mx + mw, my + mh), (255, 0, 0), 2)
-
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 255, 0), 2)
+                        cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), (0, 255, 0), 2)
+                    for (mx, my, mw, mh) in mouths:
+                        cv2.rectangle(roi_color, (mx, my), (mx+mw, my+mh), (255, 0, 0), 2)
 
             else:
+                # Distraction detection (no face for 5 sec)
                 if detection_mode in ["All", "Distraction"]:
                     if distraction_start is None:
                         distraction_start = time.time()
@@ -129,7 +117,7 @@ def main():
                 else:
                     distraction_start = None
 
-            # Display status
+            # Alerts and UI updates
             status = "✅ Normal"
             color = (0, 255, 0)
             if drowsy:
@@ -137,13 +125,11 @@ def main():
                 color = (0, 0, 255)
                 play_alert()
                 st.session_state.logs = log_event("Drowsiness Detected", st.session_state.logs)
-
             elif yawn:
                 status = "😮 Yawning Detected! Take a Break!"
                 color = (0, 0, 255)
                 play_alert()
                 st.session_state.logs = log_event("Yawning Detected", st.session_state.logs)
-
             elif distracted:
                 status = "🚫 Distraction Detected! Focus on the Road!"
                 color = (0, 0, 255)
@@ -151,10 +137,8 @@ def main():
                 st.session_state.logs = log_event("Distraction Detected", st.session_state.logs)
 
             cv2.putText(frame, status, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frame_window.image(frame, channels="RGB")
-
             status_placeholder.markdown(f"### Status: {status}")
 
             time.sleep(0.05)
