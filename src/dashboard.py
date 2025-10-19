@@ -9,46 +9,43 @@ import os
 import threading
 from datetime import datetime
 
-# ---------------- SOUND HANDLER (Continuous Alarm) ----------------
+# ---------------- SOUND ALERT SETUP ----------------
 try:
     import winsound
-    def continuous_beep(stop_event):
-        """Play continuous beeps until stop_event is set."""
-        while not stop_event.is_set():
-            try:
-                winsound.Beep(2000, 300)
+    def continuous_beep(freq=2000):
+        def loop():
+            while threading.current_thread().do_run:
+                try:
+                    winsound.Beep(freq, 500)
+                except Exception:
+                    pass
                 time.sleep(0.1)
-            except Exception:
-                break
+        t = threading.Thread(target=loop)
+        t.do_run = True
+        t.daemon = True
+        t.start()
+        return t
 except Exception:
-    def continuous_beep(stop_event):
+    def continuous_beep(freq=2000):
+        return None
+
+def stop_beep_thread(thread):
+    try:
+        if thread and hasattr(thread, "do_run"):
+            thread.do_run = False
+    except:
         pass
 
-def start_alarm_thread(name):
-    """Start continuous alarm thread for a given detection type."""
-    if name not in st.session_state.alarm_threads or not st.session_state.alarm_threads[name]["thread"].is_alive():
-        stop_event = threading.Event()
-        thread = threading.Thread(target=continuous_beep, args=(stop_event,), daemon=True)
-        st.session_state.alarm_threads[name] = {"thread": thread, "stop_event": stop_event}
-        thread.start()
 
-def stop_alarm_thread(name):
-    """Stop continuous alarm thread for a given detection type."""
-    if name in st.session_state.alarm_threads:
-        st.session_state.alarm_threads[name]["stop_event"].set()
-
-# ---------------- CONFIG -----------------
+# ---------------- CONFIG ----------------
 LOG_FILE = "detection_log.csv"
 ALERT_DELAY = 5.0
-ALERT_COOLDOWN = 3.0
-
 EAR_THRESHOLD = 0.25
 YAWN_RATIO_THRESHOLD = 0.45
 DISTRACTION_YAW = 20.0
 DISTRACTION_PITCH = 15.0
 
 mp_face_mesh = mp.solutions.face_mesh
-
 LEFT_EYE_IDX = [33,160,158,133,153,144]
 RIGHT_EYE_IDX = [362,385,387,263,373,380]
 MOUTH_TOP_INNER = [13,14]
@@ -66,12 +63,12 @@ MODEL_POINTS = np.array([
 ], dtype=np.float64)
 LMKS_IDX = [1, 199, 33, 263, 61, 291]
 
-# Log setup
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Timestamp","Event","Yaw_deg","Pitch_deg","EAR","MouthRatio"])
+        csv.writer(f).writerow(["Timestamp","Event","Yaw_deg","Pitch_deg","EAR","MouthRatio"])
 
+
+# ---------------- HELPER FUNCTIONS ----------------
 def rotationMatrixToEulerAngles(R):
     sy = math.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
     singular = sy < 1e-6
@@ -113,9 +110,10 @@ def log_event(event, yaw, pitch, ear, mr):
         csv.writer(f).writerow([ts, event.strip().title(), round(yaw,2), round(pitch,2), round(ear,3), round(mr,3)])
     return {"Timestamp": ts, "Event": event.strip().title(), "Yaw": round(yaw,2), "Pitch": round(pitch,2), "EAR": round(ear,3), "MouthRatio": round(mr,3)}
 
-# ---------------- Streamlit UI ----------------
+
+# ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="Driver Vigilance Dashboard", layout="wide")
-st.title("🚘 Driver Vigilance — Continuous Alarm with 5s Delay")
+st.title("🚘 Driver Vigilance — Live Detection (5s sustained alert)")
 
 st.sidebar.header("Controls")
 start = st.sidebar.button("▶ Start Detection")
@@ -123,11 +121,6 @@ stop  = st.sidebar.button("⏹ Stop Detection")
 
 if "running" not in st.session_state:
     st.session_state.running = False
-if "logs_inapp" not in st.session_state:
-    st.session_state.logs_inapp = []
-if "alarm_threads" not in st.session_state:
-    st.session_state.alarm_threads = {}
-
 if start:
     st.session_state.running = True
 if stop:
@@ -135,122 +128,93 @@ if stop:
 
 frame_slot = st.empty()
 status_slot = st.empty()
-cols = st.columns(4)
-m_drowsy, m_yawn, m_dist, m_time = [c.empty() for c in cols]
 
-# Initialize timers & flags
-for key in ["drowsy", "yawn", "dist"]:
-    if f"{key}_start" not in st.session_state:
-        st.session_state[f"{key}_start"] = None
-    if f"{key}_alerted" not in st.session_state:
-        st.session_state[f"{key}_alerted"] = False
+if "beep_thread" not in st.session_state:
+    st.session_state.beep_thread = None
 
 if st.session_state.running:
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        st.error("Cannot access camera.")
+        st.error("Camera not accessible.")
         st.session_state.running = False
     else:
-        with mp_face_mesh.FaceMesh(refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5) as mesh:
-            try:
-                while st.session_state.running:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    h, w = frame.shape[:2]
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    result = mesh.process(rgb)
+        with mp_face_mesh.FaceMesh(refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh:
+            drowsy_start = yawn_start = dist_start = None
+            drowsy_active = yawn_active = dist_active = False
 
-                    ear, mr, yaw_deg, pitch_deg = 0, 0, 0, 0
-                    face_present = False
+            while st.session_state.running:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                h,w = frame.shape[:2]
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = face_mesh.process(rgb)
 
-                    if result.multi_face_landmarks:
-                        face_present = True
-                        lm = result.multi_face_landmarks[0].landmark
-                        lm_pts = [(int(p.x*w), int(p.y*h)) for p in lm]
-                        ear = eye_aspect_ratio(lm_pts, LEFT_EYE_IDX, RIGHT_EYE_IDX)
-                        mr = mouth_open_ratio(lm_pts)
-                        try:
-                            image_points = np.array([lm_pts[i] for i in LMKS_IDX], dtype=np.float64)
-                            focal_length = w
-                            center = (w/2, h/2)
-                            cam_matrix = np.array([[focal_length, 0, center[0]], [0, focal_length, center[1]], [0,0,1]], dtype=np.float64)
-                            dist_coeffs = np.zeros((4,1))
-                            _, rvec, _ = cv2.solvePnP(MODEL_POINTS, image_points, cam_matrix, dist_coeffs)
-                            R, _ = cv2.Rodrigues(rvec)
-                            roll_deg, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R)
-                        except Exception:
-                            pass
+                ear, mr, yaw_deg, pitch_deg = 0,0,0,0
+                face_present = False
+                if results.multi_face_landmarks:
+                    face_present = True
+                    lm = results.multi_face_landmarks[0].landmark
+                    lm_pts = [(int(p.x*w), int(p.y*h)) for p in lm]
+                    ear = eye_aspect_ratio(lm_pts, LEFT_EYE_IDX, RIGHT_EYE_IDX)
+                    mr = mouth_open_ratio(lm_pts)
+                    try:
+                        img_pts = np.array([lm_pts[i] for i in LMKS_IDX], dtype=np.float64)
+                        focal_length = w
+                        center = (w/2, h/2)
+                        cam_mtx = np.array([[focal_length, 0, center[0]],[0, focal_length, center[1]],[0,0,1]], dtype=np.float64)
+                        success, rvec, tvec = cv2.solvePnP(MODEL_POINTS, img_pts, cam_mtx, np.zeros((4,1)))
+                        R, _ = cv2.Rodrigues(rvec)
+                        roll_deg, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R)
+                    except:
+                        pass
 
-                    now = time.time()
+                now = time.time()
 
-                    # --- Drowsiness ---
-                    if face_present and ear < EAR_THRESHOLD:
-                        if st.session_state.drowsy_start is None:
-                            st.session_state.drowsy_start = now
-                        if now - st.session_state.drowsy_start >= ALERT_DELAY and not st.session_state.drowsy_alerted:
-                            start_alarm_thread("Drowsiness")
-                            entry = log_event("Drowsiness", yaw_deg, pitch_deg, ear, mr)
-                            st.session_state.logs_inapp.insert(0, entry)
-                            st.session_state.drowsy_alerted = True
-                    else:
-                        st.session_state.drowsy_start = None
-                        if st.session_state.drowsy_alerted:
-                            stop_alarm_thread("Drowsiness")
-                            st.session_state.drowsy_alerted = False
+                # DROWSINESS
+                if face_present and ear < EAR_THRESHOLD:
+                    if drowsy_start is None: drowsy_start = now
+                    if now - drowsy_start >= ALERT_DELAY:
+                        drowsy_active = True
+                else:
+                    drowsy_start = None; drowsy_active = False
 
-                    # --- Yawning ---
-                    if face_present and mr > YAWN_RATIO_THRESHOLD:
-                        if st.session_state.yawn_start is None:
-                            st.session_state.yawn_start = now
-                        if now - st.session_state.yawn_start >= ALERT_DELAY and not st.session_state.yawn_alerted:
-                            start_alarm_thread("Yawning")
-                            entry = log_event("Yawning", yaw_deg, pitch_deg, ear, mr)
-                            st.session_state.logs_inapp.insert(0, entry)
-                            st.session_state.yawn_alerted = True
-                    else:
-                        st.session_state.yawn_start = None
-                        if st.session_state.yawn_alerted:
-                            stop_alarm_thread("Yawning")
-                            st.session_state.yawn_alerted = False
+                # YAWNING
+                if face_present and mr > YAWN_RATIO_THRESHOLD:
+                    if yawn_start is None: yawn_start = now
+                    if now - yawn_start >= ALERT_DELAY:
+                        yawn_active = True
+                else:
+                    yawn_start = None; yawn_active = False
 
-                    # --- Distraction ---
-                    head_away = abs(yaw_deg) > DISTRACTION_YAW or pitch_deg > DISTRACTION_PITCH or not face_present
-                    if head_away:
-                        if st.session_state.dist_start is None:
-                            st.session_state.dist_start = now
-                        if now - st.session_state.dist_start >= ALERT_DELAY and not st.session_state.dist_alerted:
-                            start_alarm_thread("Distraction")
-                            entry = log_event("Distraction", yaw_deg, pitch_deg, ear, mr)
-                            st.session_state.logs_inapp.insert(0, entry)
-                            st.session_state.dist_alerted = True
-                    else:
-                        st.session_state.dist_start = None
-                        if st.session_state.dist_alerted:
-                            stop_alarm_thread("Distraction")
-                            st.session_state.dist_alerted = False
+                # DISTRACTION
+                if (not face_present) or abs(yaw_deg) > DISTRACTION_YAW or pitch_deg > DISTRACTION_PITCH:
+                    if dist_start is None: dist_start = now
+                    if now - dist_start >= ALERT_DELAY:
+                        dist_active = True
+                else:
+                    dist_start = None; dist_active = False
 
-                    # Draw overlays
-                    frame_disp = frame.copy()
-                    alert_msgs = []
-                    if st.session_state.drowsy_alerted: alert_msgs.append("⚠ DROWSINESS")
-                    if st.session_state.yawn_alerted: alert_msgs.append("⚠ YAWNING")
-                    if st.session_state.dist_alerted: alert_msgs.append("⚠ DISTRACTION")
+                # ALERT SOUND
+                if drowsy_active or yawn_active or dist_active:
+                    if st.session_state.beep_thread is None or not st.session_state.beep_thread.is_alive():
+                        st.session_state.beep_thread = continuous_beep(1500)
+                else:
+                    stop_beep_thread(st.session_state.beep_thread)
+                    st.session_state.beep_thread = None
 
-                    for i, msg in enumerate(alert_msgs):
-                        cv2.putText(frame_disp, msg, (100, 100+i*40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 3)
+                # DISPLAY
+                disp = frame.copy()
+                if drowsy_active: cv2.putText(disp,"⚠ DROWSINESS",(50,100),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
+                if yawn_active: cv2.putText(disp,"⚠ YAWNING",(50,150),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
+                if dist_active: cv2.putText(disp,"⚠ DISTRACTION",(50,200),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
+                frame_slot.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_column_width=True)
 
-                    frame_slot.image(cv2.cvtColor(frame_disp, cv2.COLOR_BGR2RGB), use_column_width=True)
-                    m_drowsy.metric("Drowsy", "Yes" if st.session_state.drowsy_alerted else "No")
-                    m_yawn.metric("Yawn", "Yes" if st.session_state.yawn_alerted else "No")
-                    m_dist.metric("Distract", "Yes" if st.session_state.dist_alerted else "No")
-                    m_time.metric("Time", datetime.now().strftime("%H:%M:%S"))
+                time.sleep(0.02)
 
-                    time.sleep(0.03)
-            finally:
-                cap.release()
-                cv2.destroyAllWindows()
-                for k in ["Drowsiness","Yawning","Distraction"]:
-                    stop_alarm_thread(k)
+            stop_beep_thread(st.session_state.beep_thread)
+            st.session_state.beep_thread = None
+            cap.release()
+            cv2.destroyAllWindows()
 else:
-    frame_slot.text("Camera not running. Click ▶ Start Detection in the sidebar to begin.")
+    frame_slot.text("Camera not running. Click ▶ Start Detection to begin.")
