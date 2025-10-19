@@ -10,7 +10,7 @@ import threading
 from datetime import datetime
 import pandas as pd
 
-# ---------------- SOUND ALERT SETUP ----------------
+# ================= SOUND ALERT SETUP =================
 try:
     import winsound
     def continuous_beep(freq=2000):
@@ -37,8 +37,7 @@ def stop_beep_thread(thread):
     except:
         pass
 
-
-# ---------------- CONFIG ----------------
+# ================= CONFIG =================
 LOG_FILE = "detection_log.csv"
 ALERT_DELAY = 5.0
 EAR_THRESHOLD = 0.25
@@ -53,7 +52,6 @@ MOUTH_TOP_INNER = [13,14]
 MOUTH_BOTTOM_INNER = [17,18]
 MOUTH_LEFT_CORNER = 61
 MOUTH_RIGHT_CORNER = 291
-
 MODEL_POINTS = np.array([
     (0.0, 0.0, 0.0),
     (0.0, -330.0, -65.0),
@@ -68,8 +66,7 @@ if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, "w", newline="") as f:
         csv.writer(f).writerow(["Timestamp","Event","Yaw_deg","Pitch_deg","EAR","MouthRatio"])
 
-
-# ---------------- HELPER FUNCTIONS ----------------
+# ================= FUNCTIONS =================
 def rotationMatrixToEulerAngles(R):
     sy = math.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
     singular = sy < 1e-6
@@ -111,46 +108,50 @@ def log_event(event, yaw, pitch, ear, mr):
         csv.writer(f).writerow([ts, event.strip().title(), round(yaw,2), round(pitch,2), round(ear,3), round(mr,3)])
     return {"Timestamp": ts, "Event": event.strip().title(), "Yaw": round(yaw,2), "Pitch": round(pitch,2), "EAR": round(ear,3), "MouthRatio": round(mr,3)}
 
-
-# ---------------- STREAMLIT UI ----------------
+# ================= STREAMLIT UI =================
 st.set_page_config(page_title="Driver Vigilance Dashboard", layout="wide")
+st.markdown("<h1 style='text-align:center;color:#ff4b4b;'>🚗 Driver Vigilance Detection Dashboard</h1>", unsafe_allow_html=True)
+st.write("")
 
-st.title("🚘 Driver Vigilance — Real-Time Detection Dashboard")
-
-col1, col2 = st.columns([2, 1])
+col1, col2 = st.columns([2.2, 1])
 
 with col2:
-    st.header("Controls")
-    start = st.button("▶ Start Detection")
-    stop = st.button("⏹ Stop Detection")
+    st.markdown("### 🎮 Controls")
+    start = st.button("▶ Start Detection", use_container_width=True)
+    stop = st.button("⏹ Stop Detection", use_container_width=True)
 
-    st.header("Filters")
-    event_filter = st.selectbox("Select Event Type", ["All", "Drowsiness", "Yawning", "Distraction"])
-    st.write("")
+    st.markdown("### 🔍 Filter Logs")
+    event_filter = st.selectbox("Event Type", ["All", "Drowsiness", "Yawning", "Distraction"])
 
-    st.header("Event Log")
+    st.markdown("### 🕒 Event Log (Recent 10)")
     if os.path.exists(LOG_FILE):
         df = pd.read_csv(LOG_FILE)
         if event_filter != "All":
             df = df[df["Event"] == event_filter]
         st.dataframe(df.tail(10), use_container_width=True)
     else:
-        st.write("No log data yet.")
+        st.info("No logs recorded yet.")
 
 with col1:
     frame_slot = st.empty()
     status_slot = st.empty()
+    st.markdown("### 📊 Analytics")
+    ear_chart = st.line_chart([], use_container_width=True)
+    mouth_chart = st.line_chart([], use_container_width=True)
 
+# Session state setup
 if "running" not in st.session_state:
     st.session_state.running = False
 if start:
     st.session_state.running = True
 if stop:
     st.session_state.running = False
-
 if "beep_thread" not in st.session_state:
     st.session_state.beep_thread = None
 
+ear_values, mouth_values = [], []
+
+# ================= MAIN DETECTION LOOP =================
 if st.session_state.running:
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -181,7 +182,9 @@ if st.session_state.running:
                         img_pts = np.array([lm_pts[i] for i in LMKS_IDX], dtype=np.float64)
                         focal_length = w
                         center = (w/2, h/2)
-                        cam_mtx = np.array([[focal_length, 0, center[0]],[0, focal_length, center[1]],[0,0,1]], dtype=np.float64)
+                        cam_mtx = np.array([[focal_length, 0, center[0]],
+                                            [0, focal_length, center[1]],
+                                            [0,0,1]], dtype=np.float64)
                         success, rvec, tvec = cv2.solvePnP(MODEL_POINTS, img_pts, cam_mtx, np.zeros((4,1)))
                         R, _ = cv2.Rodrigues(rvec)
                         roll_deg, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R)
@@ -189,38 +192,34 @@ if st.session_state.running:
                         pass
 
                 now = time.time()
-
-                # DROWSINESS
+                # Drowsiness
                 if face_present and ear < EAR_THRESHOLD:
                     if drowsy_start is None: drowsy_start = now
                     if now - drowsy_start >= ALERT_DELAY:
-                        if not drowsy_active:
-                            log_event("Drowsiness", yaw_deg, pitch_deg, ear, mr)
+                        if not drowsy_active: log_event("Drowsiness", yaw_deg, pitch_deg, ear, mr)
                         drowsy_active = True
                 else:
                     drowsy_start = None; drowsy_active = False
 
-                # YAWNING
+                # Yawning
                 if face_present and mr > YAWN_RATIO_THRESHOLD:
                     if yawn_start is None: yawn_start = now
                     if now - yawn_start >= ALERT_DELAY:
-                        if not yawn_active:
-                            log_event("Yawning", yaw_deg, pitch_deg, ear, mr)
+                        if not yawn_active: log_event("Yawning", yaw_deg, pitch_deg, ear, mr)
                         yawn_active = True
                 else:
                     yawn_start = None; yawn_active = False
 
-                # DISTRACTION
+                # Distraction
                 if (not face_present) or abs(yaw_deg) > DISTRACTION_YAW or pitch_deg > DISTRACTION_PITCH:
                     if dist_start is None: dist_start = now
                     if now - dist_start >= ALERT_DELAY:
-                        if not dist_active:
-                            log_event("Distraction", yaw_deg, pitch_deg, ear, mr)
+                        if not dist_active: log_event("Distraction", yaw_deg, pitch_deg, ear, mr)
                         dist_active = True
                 else:
                     dist_start = None; dist_active = False
 
-                # ALERT SOUND
+                # Sound alert
                 if drowsy_active or yawn_active or dist_active:
                     if st.session_state.beep_thread is None or not st.session_state.beep_thread.is_alive():
                         st.session_state.beep_thread = continuous_beep(1500)
@@ -228,24 +227,33 @@ if st.session_state.running:
                     stop_beep_thread(st.session_state.beep_thread)
                     st.session_state.beep_thread = None
 
-                # DISPLAY
+                # Display
                 disp = frame.copy()
-                if drowsy_active: cv2.putText(disp,"⚠ DROWSINESS",(50,100),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
-                if yawn_active: cv2.putText(disp,"⚠ YAWNING",(50,150),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
-                if dist_active: cv2.putText(disp,"⚠ DISTRACTION",(50,200),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
-                frame_slot.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_column_width=True)
+                if drowsy_active: cv2.putText(disp,"⚠ DROWSINESS DETECTED",(30,80),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
+                if yawn_active: cv2.putText(disp,"⚠ YAWNING DETECTED",(30,130),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
+                if dist_active: cv2.putText(disp,"⚠ DISTRACTION DETECTED",(30,180),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
 
-                status = f"""
-                **EAR:** {ear:.2f} | **Mouth Ratio:** {mr:.2f}  
-                **Yaw:** {yaw_deg:.2f}° | **Pitch:** {pitch_deg:.2f}°
-                """
-                status_slot.markdown(status)
+                frame_slot.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_container_width=True)
 
-                time.sleep(0.02)
+                status_slot.markdown(f"""
+                    **EAR:** {ear:.2f} | **Mouth Ratio:** {mr:.2f}  
+                    **Yaw:** {yaw_deg:.2f}° | **Pitch:** {pitch_deg:.2f}°
+                """)
+
+                # Update charts
+                ear_values.append(ear)
+                mouth_values.append(mr)
+                if len(ear_values) > 50:
+                    ear_values.pop(0)
+                    mouth_values.pop(0)
+                ear_chart.add_rows([ear])
+                mouth_chart.add_rows([mr])
+
+                time.sleep(0.03)
 
             stop_beep_thread(st.session_state.beep_thread)
             st.session_state.beep_thread = None
             cap.release()
             cv2.destroyAllWindows()
 else:
-    frame_slot.text("Camera not running. Click ▶ Start Detection to begin.")
+    frame_slot.text("📷 Camera not running. Click ▶ Start Detection to begin.")
