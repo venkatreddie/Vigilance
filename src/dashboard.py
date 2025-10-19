@@ -8,13 +8,14 @@ import csv
 import os
 import threading
 from datetime import datetime
+import pandas as pd
 
 # ---------------- SOUND ALERT SETUP ----------------
 try:
     import winsound
     def continuous_beep(freq=2000):
         def loop():
-            while threading.current_thread().do_run:
+            while getattr(threading.current_thread(), "do_run", True):
                 try:
                     winsound.Beep(freq, 500)
                 except Exception:
@@ -113,11 +114,32 @@ def log_event(event, yaw, pitch, ear, mr):
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="Driver Vigilance Dashboard", layout="wide")
-st.title("🚘 Driver Vigilance — Live Detection (5s sustained alert)")
 
-st.sidebar.header("Controls")
-start = st.sidebar.button("▶ Start Detection")
-stop  = st.sidebar.button("⏹ Stop Detection")
+st.title("🚘 Driver Vigilance — Real-Time Detection Dashboard")
+
+col1, col2 = st.columns([2, 1])
+
+with col2:
+    st.header("Controls")
+    start = st.button("▶ Start Detection")
+    stop = st.button("⏹ Stop Detection")
+
+    st.header("Filters")
+    event_filter = st.selectbox("Select Event Type", ["All", "Drowsiness", "Yawning", "Distraction"])
+    st.write("")
+
+    st.header("Event Log")
+    if os.path.exists(LOG_FILE):
+        df = pd.read_csv(LOG_FILE)
+        if event_filter != "All":
+            df = df[df["Event"] == event_filter]
+        st.dataframe(df.tail(10), use_container_width=True)
+    else:
+        st.write("No log data yet.")
+
+with col1:
+    frame_slot = st.empty()
+    status_slot = st.empty()
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -125,9 +147,6 @@ if start:
     st.session_state.running = True
 if stop:
     st.session_state.running = False
-
-frame_slot = st.empty()
-status_slot = st.empty()
 
 if "beep_thread" not in st.session_state:
     st.session_state.beep_thread = None
@@ -175,6 +194,8 @@ if st.session_state.running:
                 if face_present and ear < EAR_THRESHOLD:
                     if drowsy_start is None: drowsy_start = now
                     if now - drowsy_start >= ALERT_DELAY:
+                        if not drowsy_active:
+                            log_event("Drowsiness", yaw_deg, pitch_deg, ear, mr)
                         drowsy_active = True
                 else:
                     drowsy_start = None; drowsy_active = False
@@ -183,6 +204,8 @@ if st.session_state.running:
                 if face_present and mr > YAWN_RATIO_THRESHOLD:
                     if yawn_start is None: yawn_start = now
                     if now - yawn_start >= ALERT_DELAY:
+                        if not yawn_active:
+                            log_event("Yawning", yaw_deg, pitch_deg, ear, mr)
                         yawn_active = True
                 else:
                     yawn_start = None; yawn_active = False
@@ -191,6 +214,8 @@ if st.session_state.running:
                 if (not face_present) or abs(yaw_deg) > DISTRACTION_YAW or pitch_deg > DISTRACTION_PITCH:
                     if dist_start is None: dist_start = now
                     if now - dist_start >= ALERT_DELAY:
+                        if not dist_active:
+                            log_event("Distraction", yaw_deg, pitch_deg, ear, mr)
                         dist_active = True
                 else:
                     dist_start = None; dist_active = False
@@ -209,6 +234,12 @@ if st.session_state.running:
                 if yawn_active: cv2.putText(disp,"⚠ YAWNING",(50,150),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
                 if dist_active: cv2.putText(disp,"⚠ DISTRACTION",(50,200),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,255),3)
                 frame_slot.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_column_width=True)
+
+                status = f"""
+                **EAR:** {ear:.2f} | **Mouth Ratio:** {mr:.2f}  
+                **Yaw:** {yaw_deg:.2f}° | **Pitch:** {pitch_deg:.2f}°
+                """
+                status_slot.markdown(status)
 
                 time.sleep(0.02)
 
