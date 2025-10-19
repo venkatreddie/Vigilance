@@ -370,47 +370,94 @@ if os.path.exists(LOG_FILE):
     try:
         import pandas as pd
         import matplotlib.pyplot as plt
+        from datetime import timedelta
 
         df_all = pd.read_csv(LOG_FILE)
         if not df_all.empty:
-            # Convert timestamps
             df_all['Timestamp'] = pd.to_datetime(df_all['Timestamp'], errors='coerce')
             df_all = df_all.dropna(subset=['Timestamp'])
 
-            # ----- Summary Metrics -----
-            total_events = len(df_all)
-            last_event_time = df_all['Timestamp'].max()
-            unique_events = df_all['Event'].value_counts().to_dict()
+            # ------------- FILTERS -------------
+            st.markdown("### 🔍 Filter Options")
+
+            col1, col2, col3 = st.columns(3)
+
+            # Event Type Filter
+            event_types = sorted(df_all['Event'].unique())
+            selected_events = col1.multiselect(
+                "Select Event Types",
+                event_types,
+                default=event_types
+            )
+
+            # Date Range Filter
+            min_date = df_all['Timestamp'].min().date()
+            max_date = df_all['Timestamp'].max().date()
+            date_range = col2.date_input(
+                "Select Date Range",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date
+            )
+
+            # Recent Only Filter
+            last24 = col3.checkbox("Show only last 24 hours", value=False)
+
+            # Apply filters
+            df_filtered = df_all.copy()
+            df_filtered = df_filtered[df_filtered['Event'].isin(selected_events)]
+
+            if isinstance(date_range, tuple) and len(date_range) == 2:
+                start_date, end_date = date_range
+                df_filtered = df_filtered[
+                    (df_filtered['Timestamp'].dt.date >= start_date)
+                    & (df_filtered['Timestamp'].dt.date <= end_date)
+                ]
+
+            if last24:
+                recent_time = datetime.now() - timedelta(hours=24)
+                df_filtered = df_filtered[df_filtered['Timestamp'] >= recent_time]
+
+            # ------------- SUMMARY METRICS -------------
+            st.markdown("### 📈 Summary Overview")
+            total_events = len(df_filtered)
+            last_event_time = df_filtered['Timestamp'].max() if total_events > 0 else None
+            unique_events = df_filtered['Event'].value_counts().to_dict()
 
             colA, colB, colC = st.columns(3)
             colA.metric("Total Alerts", total_events)
-            colB.metric("Last Event", last_event_time.strftime("%Y-%m-%d %H:%M:%S") if not pd.isna(last_event_time) else "N/A")
-            colC.metric("Unique Events", ", ".join(list(unique_events.keys())))
+            colB.metric("Last Event",
+                        last_event_time.strftime("%Y-%m-%d %H:%M:%S") if pd.notna(last_event_time) else "N/A")
+            colC.metric("Unique Events", ", ".join(list(unique_events.keys())) if unique_events else "None")
 
-            st.markdown("### 🔹 Event Distribution")
+            # ------------- CHARTS -------------
+            if total_events > 0:
+                st.markdown("### 🔹 Event Distribution")
+                fig1, ax1 = plt.subplots()
+                counts = df_filtered['Event'].value_counts()
+                ax1.pie(counts, labels=counts.index, autopct='%1.1f%%', startangle=90)
+                ax1.axis('equal')
+                st.pyplot(fig1)
 
-            # Pie Chart for Events
-            fig1, ax1 = plt.subplots()
-            counts = df_all['Event'].value_counts()
-            ax1.pie(counts, labels=counts.index, autopct='%1.1f%%', startangle=90)
-            ax1.axis('equal')
-            st.pyplot(fig1)
+                st.markdown("### 🔹 Events Over Time")
+                df_filtered['Hour'] = df_filtered['Timestamp'].dt.hour
+                hourly_counts = df_filtered.groupby(['Hour', 'Event']).size().unstack(fill_value=0)
 
-            # ----- Timeline Chart -----
-            st.markdown("### 🔹 Events Over Time")
-            df_all['Hour'] = df_all['Timestamp'].dt.hour
-            hourly_counts = df_all.groupby(['Hour', 'Event']).size().unstack(fill_value=0)
+                fig2, ax2 = plt.subplots(figsize=(8, 4))
+                hourly_counts.plot(kind='bar', stacked=True, ax=ax2)
+                plt.xlabel("Hour of Day")
+                plt.ylabel("Event Count")
+                plt.title("Events per Hour")
+                st.pyplot(fig2)
 
-            fig2, ax2 = plt.subplots(figsize=(8,4))
-            hourly_counts.plot(kind='bar', stacked=True, ax=ax2)
-            plt.xlabel("Hour of Day")
-            plt.ylabel("Event Count")
-            plt.title("Events per Hour")
-            st.pyplot(fig2)
-
-            # ----- Detailed History Table -----
-            st.markdown("### 📜 Full Detection History")
-            st.dataframe(df_all.sort_values(by='Timestamp', ascending=False), use_container_width=True)
+                # ----- Detailed History Table -----
+                st.markdown("### 📜 Filtered Detection History")
+                st.dataframe(
+                    df_filtered.sort_values(by='Timestamp', ascending=False),
+                    use_container_width=True
+                )
+            else:
+                st.info("No data matches your filter selection.")
 
         else:
             st.info("No data available for analytics yet.")
@@ -419,4 +466,3 @@ if os.path.exists(LOG_FILE):
         st.error(f"Error loading analytics: {e}")
 else:
     st.info("No log file found yet. Start detection to generate analytics data.")
-
