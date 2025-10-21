@@ -14,6 +14,7 @@ import plotly.express as px
 # ================= SOUND ALERT SETUP =================
 try:
     import winsound
+
     def continuous_beep(freq=2000):
         def loop():
             while getattr(threading.current_thread(), "do_run", True):
@@ -27,9 +28,11 @@ try:
         t.daemon = True
         t.start()
         return t
+
 except Exception:
     def continuous_beep(freq=2000):
         return None
+
 
 def stop_beep_thread(thread):
     try:
@@ -37,6 +40,7 @@ def stop_beep_thread(thread):
             thread.do_run = False
     except:
         pass
+
 
 # ================= CONFIG =================
 LOG_FILE = "detection_log.csv"
@@ -53,6 +57,7 @@ MOUTH_TOP_INNER = [13,14]
 MOUTH_BOTTOM_INNER = [17,18]
 MOUTH_LEFT_CORNER = 61
 MOUTH_RIGHT_CORNER = 291
+
 MODEL_POINTS = np.array([
     (0.0, 0.0, 0.0),
     (0.0, -330.0, -65.0),
@@ -66,6 +71,7 @@ LMKS_IDX = [1, 199, 33, 263, 61, 291]
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, "w", newline="") as f:
         csv.writer(f).writerow(["Timestamp","Event","Yaw_deg","Pitch_deg","EAR","MouthRatio"])
+
 
 # ================= FUNCTIONS =================
 def rotationMatrixToEulerAngles(R):
@@ -81,6 +87,7 @@ def rotationMatrixToEulerAngles(R):
         z = 0
     return np.degrees([x, y, z])
 
+
 def eye_aspect_ratio(landmarks, left_idx, right_idx):
     def ear_calc(points):
         A = np.linalg.norm(points[1]-points[5])
@@ -90,6 +97,7 @@ def eye_aspect_ratio(landmarks, left_idx, right_idx):
     left = np.array([landmarks[i] for i in left_idx])
     right = np.array([landmarks[i] for i in right_idx])
     return (ear_calc(left) + ear_calc(right)) / 2.0
+
 
 def mouth_open_ratio(landmarks):
     top_pts = [landmarks[i] for i in MOUTH_TOP_INNER if i < len(landmarks)]
@@ -103,11 +111,16 @@ def mouth_open_ratio(landmarks):
     horizontal = math.hypot(left_corner[0]-right_corner[0], left_corner[1]-right_corner[1]) or 1.0
     return vertical / horizontal
 
+
 def log_event(event, yaw, pitch, ear, mr):
+    event = event.strip().title()
+    if event == "Yawning Detected":
+        event = "Yawning"
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a", newline="") as f:
-        csv.writer(f).writerow([ts, event.strip().title(), round(yaw,2), round(pitch,2), round(ear,3), round(mr,3)])
-    return {"Timestamp": ts, "Event": event.strip().title(), "Yaw": round(yaw,2), "Pitch": round(pitch,2), "EAR": round(ear,3), "MouthRatio": round(mr,3)}
+        csv.writer(f).writerow([ts, event, round(yaw,2), round(pitch,2), round(ear,3), round(mr,3)])
+    return {"Timestamp": ts, "Event": event, "Yaw": round(yaw,2), "Pitch": round(pitch,2), "EAR": round(ear,3), "MouthRatio": round(mr,3)}
+
 
 # ================= STREAMLIT UI =================
 st.set_page_config(page_title="Driver Vigilance Dashboard", layout="wide")
@@ -127,6 +140,7 @@ with col2:
     st.markdown("### 🕒 Event Log (Recent 10)")
     if os.path.exists(LOG_FILE):
         df = pd.read_csv(LOG_FILE)
+        df["Event"] = df["Event"].replace({"Yawning Detected": "Yawning"})
         if event_filter != "All":
             df = df[df["Event"] == event_filter]
         st.dataframe(df.tail(10), use_container_width=True)
@@ -138,6 +152,7 @@ with col2:
     if os.path.exists(LOG_FILE):
         df_all = pd.read_csv(LOG_FILE)
         if not df_all.empty:
+            df_all["Event"] = df_all["Event"].replace({"Yawning Detected": "Yawning"})
             event_counts = df_all["Event"].value_counts().reset_index()
             event_counts.columns = ["Event", "Count"]
 
@@ -151,6 +166,7 @@ with col2:
             st.info("No analytics data yet.")
     else:
         st.info("No analytics data yet.")
+
 
 with col1:
     frame_slot = st.empty()
@@ -260,7 +276,6 @@ if st.session_state.running:
                     **Yaw:** {yaw_deg:.2f}° | **Pitch:** {pitch_deg:.2f}°
                 """)
 
-                # Update charts
                 ear_values.append(ear)
                 mouth_values.append(mr)
                 if len(ear_values) > 50:
