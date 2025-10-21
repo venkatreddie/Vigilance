@@ -9,6 +9,7 @@ import os
 import threading
 from datetime import datetime
 import pandas as pd
+import plotly.express as px
 
 # ================= SOUND ALERT SETUP =================
 try:
@@ -132,14 +133,33 @@ with col2:
     else:
         st.info("No logs recorded yet.")
 
+    # ========== SESSION ANALYTICS SECTION ==========
+    st.markdown("### 📈 Session Analytics")
+    if os.path.exists(LOG_FILE):
+        df_all = pd.read_csv(LOG_FILE)
+        if not df_all.empty:
+            event_counts = df_all["Event"].value_counts().reset_index()
+            event_counts.columns = ["Event", "Count"]
+
+            st.plotly_chart(px.pie(event_counts, names="Event", values="Count", title="Event Distribution"), use_container_width=True)
+            st.plotly_chart(px.bar(event_counts, x="Event", y="Count", color="Event", title="Event Counts"), use_container_width=True)
+
+            df_all["Timestamp"] = pd.to_datetime(df_all["Timestamp"], errors="coerce")
+            df_time = df_all.groupby(pd.Grouper(key="Timestamp", freq="1min")).size().reset_index(name="Detections")
+            st.plotly_chart(px.line(df_time, x="Timestamp", y="Detections", title="Detection Trend Over Time"), use_container_width=True)
+        else:
+            st.info("No analytics data yet.")
+    else:
+        st.info("No analytics data yet.")
+
 with col1:
     frame_slot = st.empty()
     status_slot = st.empty()
-    st.markdown("### 📊 Analytics")
+    st.markdown("### 📊 Real-time EAR & Mouth Ratio")
     ear_chart = st.line_chart([], use_container_width=True)
     mouth_chart = st.line_chart([], use_container_width=True)
 
-# Session state setup
+# ================= SESSION STATE =================
 if "running" not in st.session_state:
     st.session_state.running = False
 if start:
