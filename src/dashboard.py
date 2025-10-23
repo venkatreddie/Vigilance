@@ -51,6 +51,8 @@ DISTRACTION_YAW = 20.0
 DISTRACTION_PITCH = 15.0
 
 mp_face_mesh = mp.solutions.face_mesh
+mp_hands = mp.solutions.hands
+
 LEFT_EYE_IDX = [33,160,158,133,153,144]
 RIGHT_EYE_IDX = [362,385,387,263,373,380]
 MOUTH_TOP_INNER = [13,14]
@@ -114,8 +116,6 @@ def mouth_open_ratio(landmarks):
 
 def log_event(event, yaw, pitch, ear, mr):
     event = event.strip().title()
-    if event == "Yawning Detected":
-        event = "Yawning"
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a", newline="") as f:
         csv.writer(f).writerow([ts, event, round(yaw,2), round(pitch,2), round(ear,3), round(mr,3)])
@@ -135,30 +135,26 @@ with col2:
     stop = st.button("⏹ Stop Detection", use_container_width=True)
 
     st.markdown("### 🔍 Filter Logs")
-    event_filter = st.selectbox("Event Type", ["All", "Drowsiness", "Yawning", "Distraction"])
+    event_filter = st.selectbox("Event Type", ["All", "Drowsiness", "Yawning", "Distraction", "Mobile Usage"])
 
     st.markdown("### 🕒 Event Log (Recent 10)")
     if os.path.exists(LOG_FILE):
         df = pd.read_csv(LOG_FILE)
-        df["Event"] = df["Event"].replace({"Yawning Detected": "Yawning"})
         if event_filter != "All":
             df = df[df["Event"] == event_filter]
         st.dataframe(df.tail(10), use_container_width=True)
     else:
         st.info("No logs recorded yet.")
 
-    # ========== SESSION ANALYTICS SECTION ==========
+    # ========== SESSION ANALYTICS ==========
     st.markdown("### 📈 Session Analytics")
     if os.path.exists(LOG_FILE):
         df_all = pd.read_csv(LOG_FILE)
         if not df_all.empty:
-            df_all["Event"] = df_all["Event"].replace({"Yawning Detected": "Yawning"})
             event_counts = df_all["Event"].value_counts().reset_index()
             event_counts.columns = ["Event", "Count"]
-
             st.plotly_chart(px.pie(event_counts, names="Event", values="Count", title="Event Distribution"), use_container_width=True)
             st.plotly_chart(px.bar(event_counts, x="Event", y="Count", color="Event", title="Event Counts"), use_container_width=True)
-
             df_all["Timestamp"] = pd.to_datetime(df_all["Timestamp"], errors="coerce")
             df_time = df_all.groupby(pd.Grouper(key="Timestamp", freq="1min")).size().reset_index(name="Detections")
             st.plotly_chart(px.line(df_time, x="Timestamp", y="Detections", title="Detection Trend Over Time"), use_container_width=True)
@@ -194,34 +190,37 @@ if st.session_state.running:
         st.error("Camera not accessible.")
         st.session_state.running = False
     else:
-        with mp_face_mesh.FaceMesh(refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh:
-            drowsy_start = yawn_start = dist_start = None
-            drowsy_active = yawn_active = dist_active = False
+        with mp_face_mesh.FaceMesh(refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh, \
+             mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5) as hands:
+
+            drowsy_start = yawn_start = dist_start = mobile_start = None
+            drowsy_active = yawn_active = dist_active = mobile_active = False
 
             while st.session_state.running:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                h,w = frame.shape[:2]
+                h, w = frame.shape[:2]
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_mesh.process(rgb)
+                face_results = face_mesh.process(rgb)
+                hand_results = hands.process(rgb)
 
-                ear, mr, yaw_deg, pitch_deg = 0,0,0,0
+                ear, mr, yaw_deg, pitch_deg = 0, 0, 0, 0
                 face_present = False
-                if results.multi_face_landmarks:
+                if face_results.multi_face_landmarks:
                     face_present = True
-                    lm = results.multi_face_landmarks[0].landmark
-                    lm_pts = [(int(p.x*w), int(p.y*h)) for p in lm]
+                    lm = face_results.multi_face_landmarks[0].landmark
+                    lm_pts = [(int(p.x * w), int(p.y * h)) for p in lm]
                     ear = eye_aspect_ratio(lm_pts, LEFT_EYE_IDX, RIGHT_EYE_IDX)
                     mr = mouth_open_ratio(lm_pts)
                     try:
                         img_pts = np.array([lm_pts[i] for i in LMKS_IDX], dtype=np.float64)
                         focal_length = w
-                        center = (w/2, h/2)
+                        center = (w / 2, h / 2)
                         cam_mtx = np.array([[focal_length, 0, center[0]],
                                             [0, focal_length, center[1]],
-                                            [0,0,1]], dtype=np.float64)
-                        success, rvec, tvec = cv2.solvePnP(MODEL_POINTS, img_pts, cam_mtx, np.zeros((4,1)))
+                                            [0, 0, 1]], dtype=np.float64)
+                        success, rvec, tvec = cv2.solvePnP(MODEL_POINTS, img_pts, cam_mtx, np.zeros((4, 1)))
                         R, _ = cv2.Rodrigues(rvec)
                         roll_deg, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R)
                     except:
@@ -255,8 +254,28 @@ if st.session_state.running:
                 else:
                     dist_start = None; dist_active = False
 
+                # Mobile Usage (hand detection)
+                mobile_detected = False
+                if hand_results.multi_hand_landmarks:
+                    for hand_landmarks in hand_results.multi_hand_landmarks:
+                        for lm in hand_landmarks.landmark:
+                            x, y = int(lm.x * w), int(lm.y * h)
+                            if h * 0.2 < y < h * 0.8:  # hand in central region
+                                mobile_detected = True
+                                break
+                        if mobile_detected:
+                            break
+
+                if mobile_detected:
+                    if mobile_start is None: mobile_start = now
+                    if now - mobile_start >= ALERT_DELAY:
+                        if not mobile_active: log_event("Mobile Usage", yaw_deg, pitch_deg, ear, mr)
+                        mobile_active = True
+                else:
+                    mobile_start = None; mobile_active = False
+
                 # Sound alert
-                if drowsy_active or yawn_active or dist_active:
+                if drowsy_active or yawn_active or dist_active or mobile_active:
                     if st.session_state.beep_thread is None or not st.session_state.beep_thread.is_alive():
                         st.session_state.beep_thread = continuous_beep(1500)
                 else:
@@ -268,6 +287,7 @@ if st.session_state.running:
                 if drowsy_active: cv2.putText(disp,"⚠ DROWSINESS DETECTED",(30,80),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
                 if yawn_active: cv2.putText(disp,"⚠ YAWNING DETECTED",(30,130),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
                 if dist_active: cv2.putText(disp,"⚠ DISTRACTION DETECTED",(30,180),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
+                if mobile_active: cv2.putText(disp,"⚠ MOBILE USAGE DETECTED",(30,230),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
 
                 frame_slot.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_container_width=True)
 
