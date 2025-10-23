@@ -115,7 +115,10 @@ def mouth_open_ratio(landmarks):
 
 
 def log_event(event, yaw, pitch, ear, mr):
-    event = event.strip().title()
+    event = event.strip().title()  # standardize event name
+    if event == "Yawning Detected": event = "Yawning"
+    if event == "Drowsiness Detected": event = "Drowsiness"
+    if event == "Distraction Detected": event = "Distraction"
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a", newline="") as f:
         csv.writer(f).writerow([ts, event, round(yaw,2), round(pitch,2), round(ear,3), round(mr,3)])
@@ -140,6 +143,11 @@ with col2:
     st.markdown("### 🕒 Event Log (Recent 10)")
     if os.path.exists(LOG_FILE):
         df = pd.read_csv(LOG_FILE)
+        df["Event"] = df["Event"].replace({
+            "Yawning Detected": "Yawning",
+            "Drowsiness Detected": "Drowsiness",
+            "Distraction Detected": "Distraction"
+        })
         if event_filter != "All":
             df = df[df["Event"] == event_filter]
         st.dataframe(df.tail(10), use_container_width=True)
@@ -151,6 +159,11 @@ with col2:
     if os.path.exists(LOG_FILE):
         df_all = pd.read_csv(LOG_FILE)
         if not df_all.empty:
+            df_all["Event"] = df_all["Event"].replace({
+                "Yawning Detected": "Yawning",
+                "Drowsiness Detected": "Drowsiness",
+                "Distraction Detected": "Distraction"
+            })
             event_counts = df_all["Event"].value_counts().reset_index()
             event_counts.columns = ["Event", "Count"]
             st.plotly_chart(px.pie(event_counts, names="Event", values="Count", title="Event Distribution"), use_container_width=True)
@@ -260,7 +273,7 @@ if st.session_state.running:
                     for hand_landmarks in hand_results.multi_hand_landmarks:
                         for lm in hand_landmarks.landmark:
                             x, y = int(lm.x * w), int(lm.y * h)
-                            if h * 0.2 < y < h * 0.8:  # hand in central region
+                            if h * 0.2 < y < h * 0.8:
                                 mobile_detected = True
                                 break
                         if mobile_detected:
@@ -282,7 +295,6 @@ if st.session_state.running:
                     stop_beep_thread(st.session_state.beep_thread)
                     st.session_state.beep_thread = None
 
-                # Display
                 disp = frame.copy()
                 if drowsy_active: cv2.putText(disp,"⚠ DROWSINESS DETECTED",(30,80),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
                 if yawn_active: cv2.putText(disp,"⚠ YAWNING DETECTED",(30,130),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
