@@ -267,7 +267,7 @@ if st.session_state.running:
                 else:
                     dist_start = None; dist_active = False
 
-                # Mobile Usage (hand detection)
+                # Mobile Usage
                 mobile_detected = False
                 if hand_results.multi_hand_landmarks:
                     for hand_landmarks in hand_results.multi_hand_landmarks:
@@ -287,6 +287,21 @@ if st.session_state.running:
                 else:
                     mobile_start = None; mobile_active = False
 
+                # ===== Accident Probability Calculation =====
+                risk = 0
+                if drowsy_active: risk += 50
+                if yawn_active: risk += 30
+                if dist_active: risk += 40
+                if mobile_active: risk += 20
+                risk = min(100, risk)
+
+                if risk <= 30:
+                    color = "🟢 Low Risk"
+                elif risk <= 60:
+                    color = "🟡 Medium Risk"
+                else:
+                    color = "🔴 HIGH RISK"
+
                 # Sound alert
                 if drowsy_active or yawn_active or dist_active or mobile_active:
                     if st.session_state.beep_thread is None or not st.session_state.beep_thread.is_alive():
@@ -295,17 +310,20 @@ if st.session_state.running:
                     stop_beep_thread(st.session_state.beep_thread)
                     st.session_state.beep_thread = None
 
+                # ----- Display -----
                 disp = frame.copy()
                 if drowsy_active: cv2.putText(disp,"⚠ DROWSINESS DETECTED",(30,80),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
                 if yawn_active: cv2.putText(disp,"⚠ YAWNING DETECTED",(30,130),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
                 if dist_active: cv2.putText(disp,"⚠ DISTRACTION DETECTED",(30,180),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
                 if mobile_active: cv2.putText(disp,"⚠ MOBILE USAGE DETECTED",(30,230),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
+                cv2.putText(disp, f"🚦 Accident Risk: {risk:.1f}% ({color})", (30,280), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,165,255), 3)
 
                 frame_slot.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 status_slot.markdown(f"""
                     **EAR:** {ear:.2f} | **Mouth Ratio:** {mr:.2f}  
-                    **Yaw:** {yaw_deg:.2f}° | **Pitch:** {pitch_deg:.2f}°
+                    **Yaw:** {yaw_deg:.2f}° | **Pitch:** {pitch_deg:.2f}°  
+                    **🚦 Accident Risk Probability:** {risk:.1f}% ({color})
                 """)
 
                 ear_values.append(ear)
@@ -326,21 +344,22 @@ else:
     frame_slot.text("📷 Camera not running. Click ▶ Start Detection to begin.")
 
     # ----- 📱 Mobile Usage Trend Chart -----
-mobile_df = df_all[df_all["Event"].str.contains("Mobile", case=False, na=False)]
-if not mobile_df.empty:
-    mobile_df["Timestamp"] = pd.to_datetime(mobile_df["Timestamp"], errors="coerce")
-    mobile_time = mobile_df.groupby(pd.Grouper(key="Timestamp", freq="1min")).size().reset_index(name="MobileDetections")
-    st.plotly_chart(
-        px.line(
-            mobile_time,
-            x="Timestamp",
-            y="MobileDetections",
-            title="📱 Mobile Usage Trends Over Time",
-            markers=True,
-            line_shape="linear"
-        ),
-        use_container_width=True
-    )
-else:
-    st.info("No Mobile Usage data recorded yet.")
-
+    if os.path.exists(LOG_FILE):
+        df_all = pd.read_csv(LOG_FILE)
+        mobile_df = df_all[df_all["Event"].str.contains("Mobile", case=False, na=False)]
+        if not mobile_df.empty:
+            mobile_df["Timestamp"] = pd.to_datetime(mobile_df["Timestamp"], errors="coerce")
+            mobile_time = mobile_df.groupby(pd.Grouper(key="Timestamp", freq="1min")).size().reset_index(name="MobileDetections")
+            st.plotly_chart(
+                px.line(
+                    mobile_time,
+                    x="Timestamp",
+                    y="MobileDetections",
+                    title="📱 Mobile Usage Trends Over Time",
+                    markers=True,
+                    line_shape="linear"
+                ),
+                use_container_width=True
+            )
+        else:
+            st.info("No Mobile Usage data recorded yet.")
