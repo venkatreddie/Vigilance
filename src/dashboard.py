@@ -324,3 +324,23 @@ if st.session_state.running:
             cv2.destroyAllWindows()
 else:
     frame_slot.text("📷 Camera not running. Click ▶ Start Detection to begin.")
+
+    # ----- 📱 Mobile Usage Trend Chart -----
+mobile_df = df_all[df_all["Event"].str.contains("Mobile", case=False, na=False)]
+if not mobile_df.empty:
+    mobile_df["Timestamp"] = pd.to_datetime(mobile_df["Timestamp"], errors="coerce")
+    mobile_time = mobile_df.groupby(pd.Grouper(key="Timestamp", freq="1min")).size().reset_index(name="MobileDetections")
+    st.plotly_chart(
+        px.line(
+            mobile_time,
+            x="Timestamp",
+            y="MobileDetections",
+            title="📱 Mobile Usage Trends Over Time",
+            markers=True,
+            line_shape="linear"
+        ),
+        use_container_width=True
+    )
+else:
+    st.info("No Mobile Usage data recorded yet.")
+
