@@ -1,365 +1,204 @@
-import streamlit as st
 import cv2
-import mediapipe as mp
+import streamlit as st
 import numpy as np
-import math
 import time
-import csv
-import os
-import threading
 from datetime import datetime
 import pandas as pd
-import plotly.express as px
+from playsound import playsound
+import threading
+import tempfile
+import os
+from collections import deque
+from streamlit.components.v1 import html
+from io import BytesIO
+import base64
 
-# ================= SOUND ALERT SETUP =================
-try:
-    import winsound
-
-    def continuous_beep(freq=2000):
-        def loop():
-            while getattr(threading.current_thread(), "do_run", True):
-                try:
-                    winsound.Beep(freq, 500)
-                except Exception:
-                    pass
-                time.sleep(0.1)
-        t = threading.Thread(target=loop)
-        t.do_run = True
-        t.daemon = True
-        t.start()
-        return t
-
-except Exception:
-    def continuous_beep(freq=2000):
-        return None
-
-
-def stop_beep_thread(thread):
-    try:
-        if thread and hasattr(thread, "do_run"):
-            thread.do_run = False
-    except:
-        pass
-
-
-# ================= CONFIG =================
-LOG_FILE = "detection_log.csv"
-ALERT_DELAY = 5.0
-EAR_THRESHOLD = 0.25
-YAWN_RATIO_THRESHOLD = 0.45
-DISTRACTION_YAW = 20.0
-DISTRACTION_PITCH = 15.0
-
-mp_face_mesh = mp.solutions.face_mesh
-mp_hands = mp.solutions.hands
-
-LEFT_EYE_IDX = [33,160,158,133,153,144]
-RIGHT_EYE_IDX = [362,385,387,263,373,380]
-MOUTH_TOP_INNER = [13,14]
-MOUTH_BOTTOM_INNER = [17,18]
-MOUTH_LEFT_CORNER = 61
-MOUTH_RIGHT_CORNER = 291
-
-MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),
-    (0.0, -330.0, -65.0),
-    (-225.0, 170.0, -135.0),
-    (225.0, 170.0, -135.0),
-    (-150.0, -150.0, -125.0),
-    (150.0, -150.0, -125.0)
-], dtype=np.float64)
-LMKS_IDX = [1, 199, 33, 263, 61, 291]
-
-if not os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "w", newline="") as f:
-        csv.writer(f).writerow(["Timestamp","Event","Yaw_deg","Pitch_deg","EAR","MouthRatio"])
-
-
-# ================= FUNCTIONS =================
-def rotationMatrixToEulerAngles(R):
-    sy = math.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
-    singular = sy < 1e-6
-    if not singular:
-        x = math.atan2(R[2,1], R[2,2])
-        y = math.atan2(-R[2,0], sy)
-        z = math.atan2(R[1,0], R[0,0])
-    else:
-        x = math.atan2(-R[1,2], R[1,1])
-        y = math.atan2(-R[2,0], sy)
-        z = 0
-    return np.degrees([x, y, z])
-
-
-def eye_aspect_ratio(landmarks, left_idx, right_idx):
-    def ear_calc(points):
-        A = np.linalg.norm(points[1]-points[5])
-        B = np.linalg.norm(points[2]-points[4])
-        C = np.linalg.norm(points[0]-points[3])
-        return (A+B)/(2.0*C) if C!=0 else 0.0
-    left = np.array([landmarks[i] for i in left_idx])
-    right = np.array([landmarks[i] for i in right_idx])
-    return (ear_calc(left) + ear_calc(right)) / 2.0
-
-
-def mouth_open_ratio(landmarks):
-    top_pts = [landmarks[i] for i in MOUTH_TOP_INNER if i < len(landmarks)]
-    bottom_pts = [landmarks[i] for i in MOUTH_BOTTOM_INNER if i < len(landmarks)]
-    if not top_pts or not bottom_pts:
-        return 0.0
-    verticals = [math.hypot(t[0]-b[0], t[1]-b[1]) for t,b in zip(top_pts, bottom_pts)]
-    vertical = float(np.mean(verticals)) if verticals else 0.0
-    left_corner = landmarks[MOUTH_LEFT_CORNER]
-    right_corner = landmarks[MOUTH_RIGHT_CORNER]
-    horizontal = math.hypot(left_corner[0]-right_corner[0], left_corner[1]-right_corner[1]) or 1.0
-    return vertical / horizontal
-
-
-def log_event(event, yaw, pitch, ear, mr):
-    event = event.strip().title()  # standardize event name
-    if event == "Yawning Detected": event = "Yawning"
-    if event == "Drowsiness Detected": event = "Drowsiness"
-    if event == "Distraction Detected": event = "Distraction"
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_FILE, "a", newline="") as f:
-        csv.writer(f).writerow([ts, event, round(yaw,2), round(pitch,2), round(ear,3), round(mr,3)])
-    return {"Timestamp": ts, "Event": event, "Yaw": round(yaw,2), "Pitch": round(pitch,2), "EAR": round(ear,3), "MouthRatio": round(mr,3)}
-
-
-# ================= STREAMLIT UI =================
+# ===================== Streamlit Page Setup =====================
 st.set_page_config(page_title="Driver Vigilance Dashboard", layout="wide")
-st.markdown("<h1 style='text-align:center;color:#ff4b4b;'>🚗 Driver Vigilance Detection Dashboard</h1>", unsafe_allow_html=True)
-st.write("")
 
-col1, col2 = st.columns([2.2, 1])
+st.markdown("""
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .main {
+            background-color: #ffffff;
+            border-radius: 15px;
+            padding: 20px;
+        }
+        .block-container {
+            padding-top: 1rem;
+        }
+        h1, h2, h3 {
+            color: #003366;
+        }
+        .card {
+            background-color: #e9f2ff;
+            border: 2px solid #0056b3;
+            border-radius: 15px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-with col2:
-    st.markdown("### 🎮 Controls")
-    start = st.button("▶ Start Detection", use_container_width=True)
-    stop = st.button("⏹ Stop Detection", use_container_width=True)
+st.title("🚗 Driver Vigilance Detection Dashboard")
 
-    st.markdown("### 🔍 Filter Logs")
-    event_filter = st.selectbox("Event Type", ["All", "Drowsiness", "Yawning", "Distraction", "Mobile Usage"])
+# ===================== Helper Functions =====================
 
-    st.markdown("### 🕒 Event Log (Recent 10)")
-    if os.path.exists(LOG_FILE):
-        df = pd.read_csv(LOG_FILE)
-        df["Event"] = df["Event"].replace({
-            "Yawning Detected": "Yawning",
-            "Drowsiness Detected": "Drowsiness",
-            "Distraction Detected": "Distraction"
-        })
-        if event_filter != "All":
-            df = df[df["Event"] == event_filter]
-        st.dataframe(df.tail(10), use_container_width=True)
-    else:
-        st.info("No logs recorded yet.")
+def play_beep_sound():
+    """Plays continuous beep in a separate thread."""
+    def beep_loop():
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        temp_file.write(b'\x00')
+        temp_file.close()
+        playsound("alert.mp3") if os.path.exists("alert.mp3") else None
+    threading.Thread(target=beep_loop, daemon=True).start()
 
-    # ========== SESSION ANALYTICS ==========
-    st.markdown("### 📈 Session Analytics")
-    if os.path.exists(LOG_FILE):
-        df_all = pd.read_csv(LOG_FILE)
-        if not df_all.empty:
-            df_all["Event"] = df_all["Event"].replace({
-                "Yawning Detected": "Yawning",
-                "Drowsiness Detected": "Drowsiness",
-                "Distraction Detected": "Distraction"
-            })
-            event_counts = df_all["Event"].value_counts().reset_index()
-            event_counts.columns = ["Event", "Count"]
-            st.plotly_chart(px.pie(event_counts, names="Event", values="Count", title="Event Distribution"), use_container_width=True)
-            st.plotly_chart(px.bar(event_counts, x="Event", y="Count", color="Event", title="Event Counts"), use_container_width=True)
-            df_all["Timestamp"] = pd.to_datetime(df_all["Timestamp"], errors="coerce")
-            df_time = df_all.groupby(pd.Grouper(key="Timestamp", freq="1min")).size().reset_index(name="Detections")
-            st.plotly_chart(px.line(df_time, x="Timestamp", y="Detections", title="Detection Trend Over Time"), use_container_width=True)
-        else:
-            st.info("No analytics data yet.")
-    else:
-        st.info("No analytics data yet.")
+def log_event(event_type, yaw, pitch, ear, mar):
+    """Logs the detection event to the dataframe."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_event = pd.DataFrame([[ts, event_type, yaw, pitch, ear, mar]],
+                             columns=["Timestamp", "Event", "Yaw", "Pitch", "EAR", "MAR"])
+    st.session_state.logs = pd.concat([st.session_state.logs, new_event], ignore_index=True)
 
+# ===================== Initialize Session States =====================
+if "run" not in st.session_state:
+    st.session_state.run = False
+if "logs" not in st.session_state:
+    st.session_state.logs = pd.DataFrame(columns=["Timestamp", "Event", "Yaw", "Pitch", "EAR", "MAR"])
+if "safety_score" not in st.session_state:
+    st.session_state.safety_score = 100
+
+# ===================== Sidebar Controls =====================
+with st.sidebar:
+    st.header("🧭 Controls")
+    start_btn = st.button("▶ Start Detection", use_container_width=True)
+    stop_btn = st.button("⏹ Stop Detection", use_container_width=True)
+    st.divider()
+    st.header("⚙️ Parameters")
+    EAR_THRESHOLD = st.slider("Drowsiness EAR Threshold", 0.1, 0.3, 0.2)
+    MAR_THRESHOLD = st.slider("Yawning MAR Threshold", 0.5, 0.8, 0.65)
+    DISTRACTION_THRESHOLD = st.slider("Distraction Angle Threshold", 10, 25, 15)
+    st.divider()
+    st.caption("🎵 Alerts are triggered after 5s of continuous detection.")
+
+# ===================== Safety Score Panel =====================
+def update_safety(event_type):
+    deduction = {"Drowsiness": 15, "Yawning": 10, "Distraction": 12, "Mobile Usage": 8}
+    st.session_state.safety_score = max(0, st.session_state.safety_score - deduction.get(event_type, 5))
+    color = "green" if st.session_state.safety_score > 70 else "orange" if st.session_state.safety_score > 40 else "red"
+    st.markdown(f"""
+        <div class="card">
+            <h3>🛡️ Safety Score</h3>
+            <div style="width:100%; background:#ddd; border-radius:10px;">
+                <div style="width:{st.session_state.safety_score}%; background:{color}; color:white; text-align:center; padding:5px; border-radius:10px;">
+                    {st.session_state.safety_score}/100
+                </div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+# ===================== Layout =====================
+col1, col2 = st.columns([2, 1])
+
+# ===================== Detection Simulation (Replace with Real Detection) =====================
+def simulate_detection():
+    """Simulated detection - replace with detection_system output later"""
+    yaw = np.random.uniform(-15, 15)
+    pitch = np.random.uniform(-10, 10)
+    ear = np.random.uniform(0.15, 0.35)
+    mar = np.random.uniform(0.4, 0.8)
+    return yaw, pitch, ear, mar
+
+# ===================== Real-Time Detection Loop =====================
+if start_btn:
+    st.session_state.run = True
+if stop_btn:
+    st.session_state.run = False
 
 with col1:
-    frame_slot = st.empty()
-    status_slot = st.empty()
-    st.markdown("### 📊 Real-time EAR & Mouth Ratio")
-    ear_chart = st.line_chart([], use_container_width=True)
-    mouth_chart = st.line_chart([], use_container_width=True)
+    st.subheader("🎥 Live Detection Feed")
+    frame_placeholder = st.empty()
+    status_placeholder = st.empty()
 
-# ================= SESSION STATE =================
-if "running" not in st.session_state:
-    st.session_state.running = False
-if start:
-    st.session_state.running = True
-if stop:
-    st.session_state.running = False
-if "beep_thread" not in st.session_state:
-    st.session_state.beep_thread = None
+    if st.session_state.run:
+        cap = cv2.VideoCapture(0)
+        detection_start = {"Drowsiness": None, "Yawning": None, "Distraction": None}
+        last_event_time = time.time()
 
-ear_values, mouth_values = [], []
+        while st.session_state.run:
+            ret, frame = cap.read()
+            if not ret:
+                st.error("Camera not detected. Please check webcam.")
+                break
 
-# ================= MAIN DETECTION LOOP =================
-if st.session_state.running:
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Camera not accessible.")
-        st.session_state.running = False
-    else:
-        with mp_face_mesh.FaceMesh(refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh, \
-             mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5) as hands:
+            yaw, pitch, ear, mar = simulate_detection()
 
-            drowsy_start = yawn_start = dist_start = mobile_start = None
-            drowsy_active = yawn_active = dist_active = mobile_active = False
+            # Detect Drowsiness
+            if ear < EAR_THRESHOLD:
+                if detection_start["Drowsiness"] is None:
+                    detection_start["Drowsiness"] = time.time()
+                elif time.time() - detection_start["Drowsiness"] >= 5:
+                    status_placeholder.error("😴 Drowsiness Detected!")
+                    log_event("Drowsiness", yaw, pitch, ear, mar)
+                    update_safety("Drowsiness")
+                    play_beep_sound()
+            else:
+                detection_start["Drowsiness"] = None
 
-            while st.session_state.running:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                h, w = frame.shape[:2]
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                face_results = face_mesh.process(rgb)
-                hand_results = hands.process(rgb)
+            # Detect Yawning
+            if mar > MAR_THRESHOLD:
+                if detection_start["Yawning"] is None:
+                    detection_start["Yawning"] = time.time()
+                elif time.time() - detection_start["Yawning"] >= 5:
+                    status_placeholder.warning("😮 Yawning Detected!")
+                    log_event("Yawning", yaw, pitch, ear, mar)
+                    update_safety("Yawning")
+                    play_beep_sound()
+            else:
+                detection_start["Yawning"] = None
 
-                ear, mr, yaw_deg, pitch_deg = 0, 0, 0, 0
-                face_present = False
-                if face_results.multi_face_landmarks:
-                    face_present = True
-                    lm = face_results.multi_face_landmarks[0].landmark
-                    lm_pts = [(int(p.x * w), int(p.y * h)) for p in lm]
-                    ear = eye_aspect_ratio(lm_pts, LEFT_EYE_IDX, RIGHT_EYE_IDX)
-                    mr = mouth_open_ratio(lm_pts)
-                    try:
-                        img_pts = np.array([lm_pts[i] for i in LMKS_IDX], dtype=np.float64)
-                        focal_length = w
-                        center = (w / 2, h / 2)
-                        cam_mtx = np.array([[focal_length, 0, center[0]],
-                                            [0, focal_length, center[1]],
-                                            [0, 0, 1]], dtype=np.float64)
-                        success, rvec, tvec = cv2.solvePnP(MODEL_POINTS, img_pts, cam_mtx, np.zeros((4, 1)))
-                        R, _ = cv2.Rodrigues(rvec)
-                        roll_deg, pitch_deg, yaw_deg = rotationMatrixToEulerAngles(R)
-                    except:
-                        pass
+            # Detect Distraction
+            if abs(yaw) > DISTRACTION_THRESHOLD or abs(pitch) > DISTRACTION_THRESHOLD:
+                if detection_start["Distraction"] is None:
+                    detection_start["Distraction"] = time.time()
+                elif time.time() - detection_start["Distraction"] >= 5:
+                    status_placeholder.info("🚫 Distraction Detected!")
+                    log_event("Distraction", yaw, pitch, ear, mar)
+                    update_safety("Distraction")
+                    play_beep_sound()
+            else:
+                detection_start["Distraction"] = None
 
-                now = time.time()
-                # Drowsiness
-                if face_present and ear < EAR_THRESHOLD:
-                    if drowsy_start is None: drowsy_start = now
-                    if now - drowsy_start >= ALERT_DELAY:
-                        if not drowsy_active: log_event("Drowsiness", yaw_deg, pitch_deg, ear, mr)
-                        drowsy_active = True
-                else:
-                    drowsy_start = None; drowsy_active = False
+            # Draw frame
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_placeholder.image(frame_rgb, channels="RGB", width=640)
+        cap.release()
+        st.session_state.run = False
 
-                # Yawning
-                if face_present and mr > YAWN_RATIO_THRESHOLD:
-                    if yawn_start is None: yawn_start = now
-                    if now - yawn_start >= ALERT_DELAY:
-                        if not yawn_active: log_event("Yawning", yaw_deg, pitch_deg, ear, mr)
-                        yawn_active = True
-                else:
-                    yawn_start = None; yawn_active = False
+# ===================== Right Panel: Analytics =====================
+with col2:
+    st.markdown("### 📊 Real-Time Analytics")
+    update_safety("")
 
-                # Distraction
-                if (not face_present) or abs(yaw_deg) > DISTRACTION_YAW or pitch_deg > DISTRACTION_PITCH:
-                    if dist_start is None: dist_start = now
-                    if now - dist_start >= ALERT_DELAY:
-                        if not dist_active: log_event("Distraction", yaw_deg, pitch_deg, ear, mr)
-                        dist_active = True
-                else:
-                    dist_start = None; dist_active = False
+    st.markdown("<div class='card'><h4>Detection Logs</h4></div>", unsafe_allow_html=True)
+    st.dataframe(st.session_state.logs, use_container_width=True)
 
-                # Mobile Usage
-                mobile_detected = False
-                if hand_results.multi_hand_landmarks:
-                    for hand_landmarks in hand_results.multi_hand_landmarks:
-                        for lm in hand_landmarks.landmark:
-                            x, y = int(lm.x * w), int(lm.y * h)
-                            if h * 0.2 < y < h * 0.8:
-                                mobile_detected = True
-                                break
-                        if mobile_detected:
-                            break
+    if not st.session_state.logs.empty:
+        st.markdown("<div class='card'><h4>📈 Detection Frequency</h4></div>", unsafe_allow_html=True)
+        freq_data = st.session_state.logs["Event"].value_counts().reset_index()
+        freq_data.columns = ["Event", "Count"]
+        st.bar_chart(freq_data.set_index("Event"))
 
-                if mobile_detected:
-                    if mobile_start is None: mobile_start = now
-                    if now - mobile_start >= ALERT_DELAY:
-                        if not mobile_active: log_event("Mobile Usage", yaw_deg, pitch_deg, ear, mr)
-                        mobile_active = True
-                else:
-                    mobile_start = None; mobile_active = False
+        st.markdown("<div class='card'><h4>📉 Mobile Usage Trends</h4></div>", unsafe_allow_html=True)
+        mobile_logs = st.session_state.logs[st.session_state.logs["Event"] == "Mobile Usage"]
+        if not mobile_logs.empty:
+            mobile_logs["Timestamp"] = pd.to_datetime(mobile_logs["Timestamp"])
+            mobile_logs["Count"] = 1
+            mobile_trend = mobile_logs.resample("1T", on="Timestamp").sum(numeric_only=True)
+            st.line_chart(mobile_trend["Count"])
 
-                # ===== Accident Probability Calculation =====
-                risk = 0
-                if drowsy_active: risk += 50
-                if yawn_active: risk += 30
-                if dist_active: risk += 40
-                if mobile_active: risk += 20
-                risk = min(100, risk)
+st.success("✅ System Ready — Waiting for Camera Activation...")
 
-                if risk <= 30:
-                    color = "🟢 Low Risk"
-                elif risk <= 60:
-                    color = "🟡 Medium Risk"
-                else:
-                    color = "🔴 HIGH RISK"
-
-                # Sound alert
-                if drowsy_active or yawn_active or dist_active or mobile_active:
-                    if st.session_state.beep_thread is None or not st.session_state.beep_thread.is_alive():
-                        st.session_state.beep_thread = continuous_beep(1500)
-                else:
-                    stop_beep_thread(st.session_state.beep_thread)
-                    st.session_state.beep_thread = None
-
-                # ----- Display -----
-                disp = frame.copy()
-                if drowsy_active: cv2.putText(disp,"⚠ DROWSINESS DETECTED",(30,80),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
-                if yawn_active: cv2.putText(disp,"⚠ YAWNING DETECTED",(30,130),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
-                if dist_active: cv2.putText(disp,"⚠ DISTRACTION DETECTED",(30,180),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
-                if mobile_active: cv2.putText(disp,"⚠ MOBILE USAGE DETECTED",(30,230),cv2.FONT_HERSHEY_SIMPLEX,1.1,(0,0,255),3)
-                cv2.putText(disp, f"🚦 Accident Risk: {risk:.1f}% ({color})", (30,280), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,165,255), 3)
-
-                frame_slot.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_container_width=True)
-
-                status_slot.markdown(f"""
-                    **EAR:** {ear:.2f} | **Mouth Ratio:** {mr:.2f}  
-                    **Yaw:** {yaw_deg:.2f}° | **Pitch:** {pitch_deg:.2f}°  
-                    **🚦 Accident Risk Probability:** {risk:.1f}% ({color})
-                """)
-
-                ear_values.append(ear)
-                mouth_values.append(mr)
-                if len(ear_values) > 50:
-                    ear_values.pop(0)
-                    mouth_values.pop(0)
-                ear_chart.add_rows([ear])
-                mouth_chart.add_rows([mr])
-
-                time.sleep(0.03)
-
-            stop_beep_thread(st.session_state.beep_thread)
-            st.session_state.beep_thread = None
-            cap.release()
-            cv2.destroyAllWindows()
-else:
-    frame_slot.text("📷 Camera not running. Click ▶ Start Detection to begin.")
-
-    # ----- 📱 Mobile Usage Trend Chart -----
-    if os.path.exists(LOG_FILE):
-        df_all = pd.read_csv(LOG_FILE)
-        mobile_df = df_all[df_all["Event"].str.contains("Mobile", case=False, na=False)]
-        if not mobile_df.empty:
-            mobile_df["Timestamp"] = pd.to_datetime(mobile_df["Timestamp"], errors="coerce")
-            mobile_time = mobile_df.groupby(pd.Grouper(key="Timestamp", freq="1min")).size().reset_index(name="MobileDetections")
-            st.plotly_chart(
-                px.line(
-                    mobile_time,
-                    x="Timestamp",
-                    y="MobileDetections",
-                    title="📱 Mobile Usage Trends Over Time",
-                    markers=True,
-                    line_shape="linear"
-                ),
-                use_container_width=True
-            )
-        else:
-            st.info("No Mobile Usage data recorded yet.")
